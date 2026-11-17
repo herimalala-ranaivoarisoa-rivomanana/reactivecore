@@ -5,13 +5,10 @@ import {
 } from '@nestjs/common';
 
 import { createHash, randomUUID } from 'node:crypto';
-import {
-  ChangeLogService,
-  type JournalChange,
-} from '../reactive/changelog/change-log.service.js';
+import type { JournalChange } from '../reactive/changelog/change-log.service.js';
 import type { PoolClient } from 'pg';
-
-import { DatabaseService } from '../database/database.service.js';
+import { MutationEngineService } from '../mutation/mutation-engine.service.js';
+import { MutationCommitService } from '../mutation/mutation-commit.service.js';
 import { InventoryRepository } from './inventory.repository.js';
 
 import type { SellMedicineCommand, SaleResult } from './inventory.types.js';
@@ -21,9 +18,9 @@ type SaleOutcome = SaleResult | { rejected: 'insufficient_stock' };
 @Injectable()
 export class InventoryService {
   constructor(
-    private readonly database: DatabaseService,
+    private readonly engine: MutationEngineService,
     private readonly repository: InventoryRepository,
-    private readonly changeLog: ChangeLogService,
+    private readonly commit: MutationCommitService,
   ) {}
 
   async sell(command: SellMedicineCommand): Promise<SaleResult> {
@@ -50,7 +47,7 @@ export class InventoryService {
       .update(canonicalRequest)
       .digest('hex');
 
-    const outcome = await this.database.tenantTransaction<SaleOutcome>(
+    const outcome = await this.engine.runSerializable<SaleOutcome>(
       tenantId,
       async (client) => {
         const receiptInsert = await client.query(
@@ -145,17 +142,11 @@ export class InventoryService {
             quantity: stock.quantity,
           },
         };
-        await client.query(
-          `INSERT INTO event_outbox (event_id, tenant_id, event_type, aggregate_id, payload)
-           VALUES ($1, $2, 'stock.updated', $3, $4::jsonb)`,
-          [
-            change.eventId,
-            tenantId,
-            stock.id,
-            JSON.stringify({
-              ...change,
-              schemaVersion: 1,
-              tenantId,
+        await this.saveReceipt(client, command, result);
+        await this.commit.commitChanges(client, tenantId, [
+          {
+            ...change,
+            notification: {
               saleId,
               stockId: stock.id,
               pharmacyId,
@@ -163,12 +154,9 @@ export class InventoryService {
               remainingQuantity: stock.quantity,
               version: stock.version,
               stockVersion: stock.version,
-            }),
-          ],
-        );
-        await this.saveReceipt(client, command, result);
-        // Take the global clock lock last, after the business writes.
-        await this.changeLog.append(client, [change]);
+            },
+          },
+        ]);
         return result;
       },
     );

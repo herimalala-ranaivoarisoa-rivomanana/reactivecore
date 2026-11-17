@@ -1,4 +1,5 @@
-import { ChangeLogModule } from '../reactive/changelog/change-log.module.js';
+import { MutationModule } from '../mutation/mutation.module.js';
+import { TransferMutationService } from './transfer-mutation.service.js';
 import { Module } from '@nestjs/common';
 
 import { DatabaseModule } from '../database/database.module.js';
@@ -10,9 +11,10 @@ import { StockQueriesService } from './stock-queries.service.js';
 import { StockQueryRepository } from './stock-query.repository.js';
 
 @Module({
-  imports: [DatabaseModule, ChangeLogModule],
+  imports: [DatabaseModule, MutationModule],
   controllers: [InventoryController],
   providers: [
+    TransferMutationService,
     InventoryRepository,
     InventoryService,
     StockQueriesService,

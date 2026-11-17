@@ -77,6 +77,15 @@ export class DatabaseService implements OnModuleDestroy {
     );
   }
 
+  async serializableTenantTransaction<T>(
+    tenantId: string,
+    callback: (client: PoolClient) => Promise<T>,
+  ): Promise<T> {
+    return this.runTransaction('BEGIN ISOLATION LEVEL SERIALIZABLE', (client) =>
+      this.withTenant(client, tenantId, callback),
+    );
+  }
+
   async readOnlyTenantTransaction<T>(
     tenantId: string,
     callback: (client: PoolClient) => Promise<T>,

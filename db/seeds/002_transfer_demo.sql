@@ -1,0 +1,15 @@
+BEGIN;
+
+INSERT INTO pharmacies (id, tenant_id, name)
+VALUES ('66666666-6666-4666-8666-666666666666',
+        '11111111-1111-4111-8111-111111111111', 'Pharmacie de destination')
+ON CONFLICT (id) DO NOTHING;
+
+INSERT INTO stocks (id, tenant_id, pharmacy_id, medicine_id, quantity)
+VALUES ('88888888-8888-4888-8888-888888888888',
+        '11111111-1111-4111-8111-111111111111',
+        '66666666-6666-4666-8666-666666666666',
+        '33333333-3333-4333-8333-333333333333', 3)
+ON CONFLICT (tenant_id, pharmacy_id, medicine_id) DO NOTHING;
+
+COMMIT;

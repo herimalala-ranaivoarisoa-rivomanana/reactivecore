@@ -30,7 +30,9 @@ export function parseStockChange(
 
   if (
     !record(event) ||
-    event.type !== 'stock.updated' ||
+    (event.type !== 'stock.updated' &&
+      event.type !== 'stock.inserted' &&
+      event.type !== 'stock.deleted') ||
     !uuid(event.eventId) ||
     !uuid(event.tenantId) ||
     !uuid(event.aggregateId)
@@ -42,12 +44,17 @@ export function parseStockChange(
     tenantId: event.tenantId.toLowerCase(),
     table: 'stocks',
     documentId: event.aggregateId.toLowerCase(),
-    operation: 'update',
+    operation:
+      event.type === 'stock.updated'
+        ? 'update'
+        : event.type === 'stock.inserted'
+          ? 'insert'
+          : 'delete',
   };
   if (!record(payload)) return;
   if (payload.schemaVersion === undefined) {
     // Module 02 events may still be waiting in PostgreSQL.
-    return change;
+    return change.operation === 'update' ? change : undefined;
   }
   if (
     payload.schemaVersion !== 1 ||

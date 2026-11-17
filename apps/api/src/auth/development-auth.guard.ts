@@ -7,11 +7,11 @@ import {
   UnauthorizedException,
 } from '@nestjs/common';
 import { createHash, timingSafeEqual } from 'node:crypto';
-import type { QueryPrincipal } from '../reactive/contracts/query-context.js';
+import type { MutationPrincipal } from '../mutation/mutation.types.js';
 
 interface DevelopmentRequest {
   headers: { 'x-dev-token'?: string | string[] };
-  principal?: QueryPrincipal;
+  principal?: MutationPrincipal;
 }
 
 const digest = (value: string) => createHash('sha256').update(value).digest();
@@ -35,6 +35,10 @@ export class DevelopmentAuthGuard implements CanActivate {
       userId: '55555555-5555-4555-8555-555555555555',
       tenantId: '11111111-1111-4111-8111-111111111111',
       roles: ['developer'],
+      allowedPharmacyIds: [
+        '22222222-2222-4222-8222-222222222222',
+        '66666666-6666-4666-8666-666666666666',
+      ],
     };
     return true;
   }

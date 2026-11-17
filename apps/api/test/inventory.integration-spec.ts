@@ -3,13 +3,13 @@ import {
   type JournalChange,
 } from '../src/reactive/changelog/change-log.service.js';
 import { RedisInvalidationService } from '../src/reactive/invalidation/redis-invalidation.service.js';
-import { Test } from '@nestjs/testing';
+import { Test, type TestingModule } from '@nestjs/testing';
 import { randomUUID } from 'node:crypto';
 import { Pool } from 'pg';
 import { createClient } from 'redis';
 import { setTimeout } from 'node:timers/promises';
 import { DatabaseService } from '../src/database/database.service.js';
-import { InventoryRepository } from '../src/inventory/inventory.repository.js';
+import { MutationEngineService } from '../src/mutation/mutation-engine.service.js';
 import { InventoryModule } from '../src/inventory/inventory.module.js';
 import { ReactiveModule } from '../src/reactive/reactive.module.js';
 import { QueryExecutorService } from '../src/reactive/engine/query-executor.service.js';
@@ -48,11 +48,21 @@ const admin = new Pool({
 const database = new DatabaseService(appUrl);
 const worker = new DatabaseService(workerUrl);
 const journal = new ChangeLogService(database);
-const inventory = new InventoryService(
-  database,
-  new InventoryRepository(),
-  journal,
-);
+let inventory: InventoryService;
+let mutationEngine: MutationEngineService;
+let inventoryModule: TestingModule;
+
+beforeAll(async () => {
+  inventoryModule = await Test.createTestingModule({
+    imports: [InventoryModule],
+  })
+    .overrideProvider(DatabaseService)
+    .useValue(new DatabaseService(appUrl))
+    .compile();
+  await inventoryModule.init();
+  inventory = inventoryModule.get(InventoryService);
+  mutationEngine = inventoryModule.get(MutationEngineService);
+});
 
 async function fixture(quantity: number) {
   const tenantId = randomUUID();
@@ -93,6 +103,7 @@ const tenants: string[] = [];
 afterEach(async () => {
   for (const tenantId of tenants.splice(0)) {
     for (const table of [
+      'mutation_execution_receipts',
       'reactive_change_log',
       'event_outbox',
       'mutation_receipts',
@@ -110,6 +121,7 @@ afterEach(async () => {
 });
 afterAll(async () => {
   await Promise.all([
+    inventoryModule?.close(),
     admin.end(),
     database.onModuleDestroy(),
     worker.onModuleDestroy(),
@@ -613,4 +625,191 @@ it('rolls back the entire sale if the durable journal rejects the event', async 
       `ALTER TABLE reactive_change_log DROP CONSTRAINT ${constraint}`,
     );
   }
+});
+
+async function transferFixture(quantity: number, destinationQuantity?: number) {
+  const source = await fixture(quantity);
+  const destinationPharmacyId = randomUUID();
+  await admin.query(
+    'INSERT INTO pharmacies (id, tenant_id, name) VALUES ($1, $2, $3)',
+    [destinationPharmacyId, source.tenantId, 'Transfer destination'],
+  );
+  if (destinationQuantity !== undefined) {
+    await admin.query(
+      'INSERT INTO stocks (id, tenant_id, pharmacy_id, medicine_id, quantity) VALUES ($1,$2,$3,$4,$5)',
+      [
+        randomUUID(),
+        source.tenantId,
+        destinationPharmacyId,
+        source.medicineId,
+        destinationQuantity,
+      ],
+    );
+  }
+
+  return {
+    principal: {
+      tenantId: source.tenantId,
+      userId: randomUUID(),
+      roles: [],
+      allowedPharmacyIds: [source.pharmacyId, destinationPharmacyId],
+    },
+    name: 'inventory.transfer',
+    args: {
+      sourcePharmacyId: source.pharmacyId,
+      destinationPharmacyId,
+      medicineId: source.medicineId,
+      quantity: 1,
+    },
+    idempotencyKey: randomUUID(),
+  };
+}
+
+async function transferState(tenantId: string) {
+  const {
+    rows: [row],
+  } = await admin.query(
+    `SELECT
+      (SELECT array_agg(quantity ORDER BY quantity) FROM stocks WHERE tenant_id = $1) AS quantities,
+      (SELECT count(*)::int FROM mutation_execution_receipts WHERE tenant_id = $1) AS receipts,
+      (SELECT count(*)::int FROM event_outbox WHERE tenant_id = $1) AS events,
+      (SELECT count(*)::int FROM reactive_change_log WHERE tenant_id = $1) AS journal`,
+    [tenantId],
+  );
+  return row;
+}
+
+it('transfers two stocks atomically and scopes idempotence to an authorized principal', async () => {
+  const request = await transferFixture(6);
+  const reordered = {
+    quantity: 1,
+    medicineId: request.args.medicineId.toUpperCase(),
+    destinationPharmacyId: request.args.destinationPharmacyId,
+    sourcePharmacyId: request.args.sourcePharmacyId,
+  };
+  const results = await Promise.all([
+    mutationEngine.execute(request),
+    mutationEngine.execute({ ...request, args: reordered }),
+  ]);
+  const committed = results.find((result) => !result.replayed);
+  expect(committed?.data).toMatchObject({
+    source: { remaining: 5, version: '2' },
+    destination: { quantity: 1, version: '1' },
+  });
+  expect(results.find((result) => result.replayed)).toEqual({
+    ...committed,
+    replayed: true,
+  });
+  expect(await transferState(request.principal.tenantId)).toEqual({
+    quantities: [1, 5],
+    receipts: 1,
+    events: 2,
+    journal: 2,
+  });
+
+  const changes = await journal.readAfter(
+    request.principal.tenantId,
+    '0',
+    committed!.commitSeq,
+  );
+  expect(
+    changes.map(({ seq, ordinal, operation }) => [seq, ordinal, operation]),
+  ).toEqual([
+    [committed!.commitSeq, 0, 'update'],
+    [committed!.commitSeq, 1, 'insert'],
+  ]);
+  const outbox = await admin.query(
+    'SELECT event_id, commit_seq::text AS seq FROM event_outbox WHERE tenant_id = $1 ORDER BY id',
+    [request.principal.tenantId],
+  );
+  expect(outbox.rows).toEqual(
+    changes.map((change) => ({ event_id: change.eventId, seq: change.seq })),
+  );
+
+  await expect(
+    mutationEngine.execute({
+      ...request,
+      args: { ...request.args, quantity: 2 },
+    }),
+  ).rejects.toHaveProperty('status', 409);
+  await expect(
+    mutationEngine.execute({
+      ...request,
+      principal: { ...request.principal, allowedPharmacyIds: [] },
+    }),
+  ).rejects.toHaveProperty('status', 403);
+  expect(
+    (await database.query('SELECT * FROM mutation_execution_receipts')).rows,
+  ).toEqual([]);
+
+  const otherPrincipal = await mutationEngine.execute({
+    ...request,
+    principal: { ...request.principal, userId: randomUUID() },
+  });
+  expect(otherPrincipal.replayed).toBe(false);
+  expect(await transferState(request.principal.tenantId)).toEqual({
+    quantities: [2, 4],
+    receipts: 2,
+    events: 4,
+    journal: 4,
+  });
+});
+
+it('rejects stale versions and does not overdraw with concurrent transfers', async () => {
+  const request = await transferFixture(1, 0);
+  await expect(
+    mutationEngine.execute({
+      ...request,
+      args: { ...request.args, expectedSourceVersion: '2' },
+    }),
+  ).rejects.toHaveProperty('status', 409);
+  await expect(
+    mutationEngine.execute({
+      ...request,
+      args: { ...request.args, expectedDestinationVersion: '2' },
+    }),
+  ).rejects.toHaveProperty('status', 409);
+  const results = await Promise.allSettled([
+    mutationEngine.execute(request),
+    mutationEngine.execute({ ...request, idempotencyKey: randomUUID() }),
+  ]);
+  expect(
+    results.filter((result) => result.status === 'fulfilled'),
+  ).toHaveLength(1);
+  expect(results.find((result) => result.status === 'rejected')).toMatchObject({
+    reason: { status: 409 },
+  });
+  expect(await transferState(request.principal.tenantId)).toEqual({
+    quantities: [0, 1],
+    receipts: 1,
+    events: 2,
+    journal: 2,
+  });
+});
+
+it('rolls back both balances and the scoped receipt if the journal fails', async () => {
+  const request = await transferFixture(4, 2);
+  const before = await journal.currentSeq();
+  const constraint = `transfer_${randomUUID().replaceAll('-', '')}`;
+  await admin.query(
+    `ALTER TABLE reactive_change_log ADD CONSTRAINT ${constraint} CHECK (tenant_id <> '${request.principal.tenantId}'::uuid) NOT VALID`,
+  );
+  try {
+    await expect(mutationEngine.execute(request)).rejects.toHaveProperty(
+      'code',
+      '23514',
+    );
+    expect(await transferState(request.principal.tenantId)).toEqual({
+      quantities: [2, 4],
+      receipts: 0,
+      events: 0,
+      journal: 0,
+    });
+    expect(await journal.currentSeq()).toBe(before);
+  } finally {
+    await admin.query(
+      `ALTER TABLE reactive_change_log DROP CONSTRAINT ${constraint}`,
+    );
+  }
+  expect((await mutationEngine.execute(request)).replayed).toBe(false);
 });
