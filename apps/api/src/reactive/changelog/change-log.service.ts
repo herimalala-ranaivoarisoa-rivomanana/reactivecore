@@ -55,15 +55,35 @@ export class ChangeLogService {
     });
   }
 
-  async readAfter(tenantId: string, afterSeq: string, throughSeq: string) {
+  async readBatch(tenantId: string, afterSeq: string, throughSeq: string) {
+    const limit = 100;
+    const changes = await this.readAfter(tenantId, afterSeq, throughSeq, limit);
+    const full = new Set(changes.map(({ seq }) => seq)).size === limit;
+    return {
+      changes,
+      coveredSeq: full ? changes[changes.length - 1].seq : throughSeq,
+    };
+  }
+
+  async readAfter(
+    tenantId: string,
+    afterSeq: string,
+    throughSeq: string,
+    limit?: number,
+  ) {
     return this.database.readOnlyTenantTransaction(tenantId, async (client) => {
       const { rows } = await client.query<JournalRow>(
-        `SELECT seq::text, ordinal, event_id, table_name, document_id,
+        `WITH commits AS (
+           SELECT DISTINCT seq FROM public.reactive_change_log
+           WHERE tenant_id = $1 AND seq > $2::bigint AND seq <= $3::bigint
+           ORDER BY seq LIMIT $4
+         )
+         SELECT log.seq::text, ordinal, event_id, table_name, document_id,
                 operation, before_data, after_data
-         FROM public.reactive_change_log
-         WHERE tenant_id = $1 AND seq > $2::bigint AND seq <= $3::bigint
-         ORDER BY seq, ordinal`,
-        [tenantId, afterSeq, throughSeq],
+         FROM public.reactive_change_log AS log JOIN commits USING (seq)
+         WHERE log.tenant_id = $1
+         ORDER BY log.seq, ordinal`,
+        [tenantId, afterSeq, throughSeq, limit ?? null],
       );
       return rows.map((row) => ({
         seq: row.seq,

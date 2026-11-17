@@ -900,3 +900,33 @@ it('conserves twenty units during thirty concurrent transfer attempts', async ()
     events: successes * 2,
   });
 }, 15000);
+
+it('paginates journal commits without dropping an ordinal at the batch boundary', async () => {
+  const command = await fixture(1);
+  const start = await journal.currentSeq();
+  await database.tenantTransaction(command.tenantId, async (client) => {
+    for (let i = 0; i < 99; i++) {
+      await journal.append(client, [journalEvent(command.stockId)]);
+    }
+    await journal.append(client, [
+      journalEvent(command.stockId),
+      journalEvent(command.stockId),
+    ]);
+    await journal.append(client, [journalEvent(command.stockId)]);
+  });
+  const through = await journal.currentSeq();
+  const first = await journal.readBatch(command.tenantId, start, through);
+  expect(first.changes).toHaveLength(101);
+  expect(
+    first.changes.slice(-2).map(({ seq, ordinal }) => [seq, ordinal]),
+  ).toEqual([
+    [first.coveredSeq, 0],
+    [first.coveredSeq, 1],
+  ]);
+  const next = await journal.readBatch(
+    command.tenantId,
+    first.coveredSeq,
+    through,
+  );
+  expect(next.changes).toMatchObject([{ seq: through, ordinal: 0 }]);
+});

@@ -37,6 +37,7 @@ function scenario() {
   const journal = {
     currentSeq: vi.fn().mockResolvedValue('0'),
     hasChanges: vi.fn().mockResolvedValue(false),
+    readBatch: vi.fn().mockResolvedValue({ changes: [], coveredSeq: '0' }),
   };
   const manager = new SubscriptionManagerService(
     { execute } as unknown as QueryExecutorService,
@@ -126,7 +127,7 @@ it('reconciles without emitting identical results and respects unsubscribe', asy
     dependencies: [dependency],
   });
   journal.currentSeq.mockResolvedValue('1');
-  journal.hasChanges.mockResolvedValue(true);
+  journal.readBatch.mockResolvedValue({ changes: [change], coveredSeq: '1' });
   manager.reconcileAll();
   await vi.waitFor(() => expect(execute).toHaveBeenCalledTimes(2));
   expect(listener).toHaveBeenCalledTimes(1);
@@ -163,4 +164,46 @@ it('checks the durable journal after reading its initial snapshot, without a Red
     snapshotSeq: '11',
   });
   manager.unsubscribe(id);
+});
+
+it('advances past an unrelated journal batch without executing the query again', async () => {
+  const { execute, journal, manager, listener } = scenario();
+  execute.mockResolvedValue({
+    data: 1,
+    snapshotSeq: '0',
+    dependencies: [dependency],
+  });
+  const id = await manager.subscribe(principal, 'stocks.list', {}, listener);
+  journal.currentSeq.mockResolvedValue('4');
+  journal.readBatch.mockResolvedValue({
+    changes: [{ ...change, documentId: 'unrelated-stock' }],
+    coveredSeq: '4',
+  });
+  manager.reconcileAll();
+  await vi.waitFor(() => expect(journal.readBatch).toHaveBeenCalledTimes(1));
+  manager.reconcileAll();
+  await Promise.resolve();
+  expect(journal.readBatch).toHaveBeenCalledTimes(1);
+  expect(execute).toHaveBeenCalledTimes(1);
+  manager.unsubscribe(id);
+});
+
+it('releases an initializing subscription if the connection closes', async () => {
+  const { execute, manager, listener } = scenario();
+  const pending = deferredQuery();
+  execute.mockReturnValueOnce(pending.promise);
+  const connection = new AbortController();
+  const subscribed = manager.subscribe(
+    principal,
+    'stocks.list',
+    {},
+    listener,
+    connection.signal,
+  );
+  connection.abort();
+  pending.resolve({ data: 1, snapshotSeq: '1', dependencies: [dependency] });
+  await expect(subscribed).rejects.toThrow('Subscription closed');
+  manager.invalidate(change);
+  expect(listener).not.toHaveBeenCalled();
+  expect(execute).toHaveBeenCalledTimes(1);
 });

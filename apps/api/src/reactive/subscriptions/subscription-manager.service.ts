@@ -7,7 +7,10 @@ import {
 import { randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import { ChangeLogService } from '../changelog/change-log.service.js';
-import type { ChangeDescriptor } from '../contracts/dependency.types.js';
+import type {
+  ChangeDescriptor,
+  Dependency,
+} from '../contracts/dependency.types.js';
 import type { QueryPrincipal } from '../contracts/query-context.js';
 import { DependencyIndex } from '../engine/dependency-index.js';
 import { QueryExecutorService } from '../engine/query-executor.service.js';
@@ -28,6 +31,8 @@ interface Subscription {
   data: unknown;
   revision: number;
   coveredSeq: string;
+  dependencies: Dependency[];
+  detach?: () => void;
   generation: number;
   dirty: boolean;
   retry?: ReturnType<typeof setTimeout>;
@@ -47,7 +52,7 @@ export class SubscriptionManagerService
 
   constructor(
     private readonly executor: QueryExecutorService,
-    invalidation: InvalidationService,
+    private readonly invalidation: InvalidationService,
     private readonly journal: ChangeLogService,
   ) {
     this.index = new DependencyIndex(invalidation);
@@ -63,8 +68,10 @@ export class SubscriptionManagerService
     name: string,
     args: unknown,
     listener: (result: SubscriptionResult) => void,
+    signal?: AbortSignal,
   ): Promise<string> {
     if (this.closed) throw new Error('Subscription manager is closed');
+    signal?.throwIfAborted();
     const id = randomUUID();
     const subscription: Subscription = {
       principal: structuredClone(principal),
@@ -74,10 +81,16 @@ export class SubscriptionManagerService
       data: undefined,
       revision: 0,
       coveredSeq: '0',
+      dependencies: [],
       generation: 0,
       dirty: true,
     };
     this.subscriptions.set(id, subscription);
+    if (signal) {
+      const abort = () => this.unsubscribe(id);
+      signal.addEventListener('abort', abort, { once: true });
+      subscription.detach = () => signal.removeEventListener('abort', abort);
+    }
     try {
       await this.refresh(id, subscription);
       if (!this.subscriptions.has(id))
@@ -119,8 +132,7 @@ export class SubscriptionManagerService
           continue;
         const after = subscription.coveredSeq;
         if (BigInt(after) >= BigInt(through)) continue;
-        // The durable recovery path deliberately ignores predicate precision.
-        const changed = await this.journal.hasChanges(
+        const batch = await this.journal.readBatch(
           subscription.principal.tenantId,
           after,
           through,
@@ -132,8 +144,13 @@ export class SubscriptionManagerService
           subscription.coveredSeq !== after
         )
           continue;
-        if (changed) this.markDirty(id, subscription);
-        else subscription.coveredSeq = through;
+        const affected = batch.changes.some((change) =>
+          subscription.dependencies.some((dependency) =>
+            this.invalidation.affects(dependency, change),
+          ),
+        );
+        if (affected) this.markDirty(id, subscription);
+        else subscription.coveredSeq = batch.coveredSeq;
       }
     } finally {
       this.polling = false;
@@ -179,6 +196,7 @@ export class SubscriptionManagerService
           subscription.name,
           subscription.args,
         );
+        if (!this.subscriptions.has(id)) return;
         // Check the journal even if Redis was offline throughout the initial read.
         if (subscription.revision === 0 && attempt === 0) {
           const through = await this.journal.currentSeq();
@@ -197,6 +215,7 @@ export class SubscriptionManagerService
         if (subscription.dirty && attempt === 0) continue;
 
         this.index.replace(id, result.dependencies);
+        subscription.dependencies = result.dependencies;
         subscription.coveredSeq = result.snapshotSeq;
         if (
           subscription.revision === 0 ||
@@ -222,7 +241,9 @@ export class SubscriptionManagerService
   }
 
   unsubscribe(id: string): void {
-    clearTimeout(this.subscriptions.get(id)?.retry);
+    const subscription = this.subscriptions.get(id);
+    clearTimeout(subscription?.retry);
+    subscription?.detach?.();
     this.index.remove(id);
     this.subscriptions.delete(id);
   }

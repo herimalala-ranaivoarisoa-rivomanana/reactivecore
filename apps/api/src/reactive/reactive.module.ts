@@ -11,10 +11,11 @@ import { InvalidationService } from './invalidation/invalidation.service.js';
 import { SubscriptionManagerService } from './subscriptions/subscription-manager.service.js';
 
 import { ReactiveController } from './reactive.controller.js';
+import { ReactiveStreamController } from './reactive-stream.controller.js';
 import { RedisInvalidationService } from './invalidation/redis-invalidation.service.js';
 
 @Module({
-  controllers: [ReactiveController],
+  controllers: [ReactiveController, ReactiveStreamController],
   imports: [DatabaseModule, DiscoveryModule, ChangeLogModule],
   providers: [
     QueryRegistryService,

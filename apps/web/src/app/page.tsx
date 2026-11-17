@@ -1,3 +1,4 @@
+import Link from "next/link";
 import { connection } from "next/server";
 import { Suspense } from "react";
 
@@ -67,6 +68,8 @@ export default function Home() {
       <p>
         Next.js 16.4 + NestJS + PostgreSQL + Redis
       </p>
+
+      <p><Link href="/inventory">Ouvrir le laboratoire des stocks en direct</Link></p>
 
       <h2>Infrastructure Status</h2>
 
