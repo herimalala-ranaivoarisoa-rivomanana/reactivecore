@@ -5,6 +5,10 @@ import {
 } from '@nestjs/common';
 
 import { createHash, randomUUID } from 'node:crypto';
+import {
+  ChangeLogService,
+  type JournalChange,
+} from '../reactive/changelog/change-log.service.js';
 import type { PoolClient } from 'pg';
 
 import { DatabaseService } from '../database/database.service.js';
@@ -19,6 +23,7 @@ export class InventoryService {
   constructor(
     private readonly database: DatabaseService,
     private readonly repository: InventoryRepository,
+    private readonly changeLog: ChangeLogService,
   ) {}
 
   async sell(command: SellMedicineCommand): Promise<SaleResult> {
@@ -124,50 +129,46 @@ export class InventoryService {
           stockVersion: stock.version,
         };
 
+        const change: JournalChange = {
+          eventId: randomUUID(),
+          table: 'stocks',
+          documentId: stock.id,
+          operation: 'update',
+          before: {
+            pharmacy_id: pharmacyId,
+            medicine_id: medicineId,
+            quantity: stock.quantity + quantity,
+          },
+          after: {
+            pharmacy_id: pharmacyId,
+            medicine_id: medicineId,
+            quantity: stock.quantity,
+          },
+        };
         await client.query(
-          `
-          INSERT INTO event_outbox (
-            event_id,
-            tenant_id,
-            event_type,
-            aggregate_id,
-            payload
-          )
-          VALUES ($1, $2, $3, $4, $5::jsonb)
-          `,
+          `INSERT INTO event_outbox (event_id, tenant_id, event_type, aggregate_id, payload)
+           VALUES ($1, $2, 'stock.updated', $3, $4::jsonb)`,
           [
-            randomUUID(),
+            change.eventId,
             tenantId,
-            'stock.updated',
             stock.id,
             JSON.stringify({
+              ...change,
+              schemaVersion: 1,
+              tenantId,
               saleId,
               stockId: stock.id,
               pharmacyId,
               medicineId,
               remainingQuantity: stock.quantity,
               version: stock.version,
-              schemaVersion: 1,
-              tenantId,
-              table: 'stocks',
-              documentId: stock.id,
-              operation: 'update',
-              before: {
-                pharmacy_id: pharmacyId,
-                medicine_id: medicineId,
-                quantity: stock.quantity + quantity,
-              },
-              after: {
-                pharmacy_id: pharmacyId,
-                medicine_id: medicineId,
-                quantity: stock.quantity,
-              },
               stockVersion: stock.version,
             }),
           ],
         );
-
         await this.saveReceipt(client, command, result);
+        // Take the global clock lock last, after the business writes.
+        await this.changeLog.append(client, [change]);
         return result;
       },
     );

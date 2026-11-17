@@ -17,7 +17,7 @@ Le dépôt utilise les pilotes `pg` et `redis`, la validation NestJS avec `class
 
 ### Créer le schéma et les données de démonstration
 
-Exécutez les trois migrations une seule fois sur une base du Module 01 qui ne contient pas encore les tables du Module 02. Le compte du conteneur PostgreSQL exécute les migrations. `ON_ERROR_STOP` arrête la commande dès la première erreur.
+Dans la version du Module 02, exécutez les trois migrations une seule fois sur une base du Module 01 qui ne contient pas encore ses tables. À partir du [Module 04](Module%2004.md), appliquez ensuite la migration 004 avant de lancer les ventes ou les requêtes réactives. Le compte du conteneur PostgreSQL exécute les migrations. `ON_ERROR_STOP` arrête la commande dès la première erreur.
 
 ```bash
 module02_psql() {
@@ -27,7 +27,7 @@ module02_psql() {
 }
 
 module02_migrate() {
-  for migration in db/migrations/*.sql; do
+  for migration in db/migrations/00[1-3]_*.sql; do
     module02_psql "$@" < "$migration" || return 1
   done
 }

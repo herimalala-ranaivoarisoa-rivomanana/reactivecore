@@ -37,14 +37,13 @@ export class StockQueryRepository {
       [ctx.principal.tenantId, pharmacyId, availableOnly],
     );
 
-    // Dépendance conservatrice : toute modification
-    // de stock dans cette pharmacie peut affecter
-    // le résultat, y compris une nouvelle insertion.
+    // Track the predicate even when no stock rows match yet.
     ctx.dependencies.add({
       kind: 'predicate',
       tenantId: ctx.principal.tenantId,
       table: 'stocks',
       index: 'idx_stocks_pharmacy',
+      ...(availableOnly ? { ranges: { quantity: { gt: 0 } } } : {}),
       equals: {
         pharmacy_id: pharmacyId,
       },

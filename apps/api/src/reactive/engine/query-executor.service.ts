@@ -11,6 +11,7 @@ import type { Dependency } from '../contracts/dependency.types.js';
 
 export interface ExecutedQuery {
   data: unknown;
+  snapshotSeq: string;
   dependencies: Dependency[];
 }
 
@@ -31,10 +32,10 @@ export class QueryExecutorService {
 
     const collector = this.tracker.createCollector();
 
-    const data = await this.database.readOnlyTenantTransaction(
+    return this.database.snapshotTenantTransaction(
       principal.tenantId,
-      async (client) => {
-        return handler(
+      async (client, snapshotSeq) => {
+        const data = await handler(
           {
             principal,
             client,
@@ -42,12 +43,8 @@ export class QueryExecutorService {
           },
           args,
         );
+        return { data, snapshotSeq, dependencies: collector.snapshot() };
       },
     );
-
-    return {
-      data,
-      dependencies: collector.snapshot(),
-    };
   }
 }

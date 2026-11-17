@@ -16,6 +16,15 @@ export class QueryDependencyCollector implements DependencyCollector {
             Object.entries(dependency.equals).sort(([left], [right]) =>
               left.localeCompare(right),
             ),
+            Object.entries(dependency.ranges ?? {})
+              .sort(([left], [right]) => left.localeCompare(right))
+              .map(([field, range]) => [
+                field,
+                range.gt,
+                range.gte,
+                range.lt,
+                range.lte,
+              ]),
           ])
         : JSON.stringify([
             dependency.kind,

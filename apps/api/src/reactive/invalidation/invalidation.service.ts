@@ -30,21 +30,30 @@ export class InvalidationService {
     // on invalide par prudence.
     return (
       (change.operation !== 'insert' &&
-        this.matchesOrUnknown(dependency.equals, change.before)) ||
+        this.matchesOrUnknown(dependency, change.before)) ||
       (change.operation !== 'delete' &&
-        this.matchesOrUnknown(dependency.equals, change.after))
+        this.matchesOrUnknown(dependency, change.after))
     );
   }
 
   private matchesOrUnknown(
-    equals: Record<string, string>,
-    row: Record<string, unknown> | undefined,
+    predicate: Extract<Dependency, { kind: 'predicate' }>,
+    row: ChangeDescriptor['before'],
   ): boolean {
-    if (!row) return true;
+    if (row === null) return false;
+    if (row === undefined) return true;
 
-    return Object.entries(equals).every(([field, expected]) => {
-      if (!Object.hasOwn(row, field)) return true;
-      return row[field] === expected;
-    });
+    for (const [field, expected] of Object.entries(predicate.equals)) {
+      if (Object.hasOwn(row, field) && row[field] !== expected) return false;
+    }
+    for (const [field, range] of Object.entries(predicate.ranges ?? {})) {
+      const value = row[field];
+      if (typeof value !== 'number' || !Number.isFinite(value)) continue;
+      if (range.gt !== undefined && value <= range.gt) return false;
+      if (range.gte !== undefined && value < range.gte) return false;
+      if (range.lt !== undefined && value >= range.lt) return false;
+      if (range.lte !== undefined && value > range.lte) return false;
+    }
+    return true;
   }
 }

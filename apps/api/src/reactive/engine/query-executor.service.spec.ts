@@ -21,9 +21,11 @@ it('executes the registered handler on the tenant connection and returns its dep
   });
   const registry = { get: vi.fn().mockReturnValue(handler) };
   const database = {
-    readOnlyTenantTransaction: vi.fn(
-      async (_tenant: string, run: (client: PoolClient) => Promise<unknown>) =>
-        run(client),
+    snapshotTenantTransaction: vi.fn(
+      async (
+        _tenant: string,
+        run: (client: PoolClient, seq: string) => Promise<unknown>,
+      ) => run(client, '42'),
     ),
   };
   const executor = new QueryExecutorService(
@@ -36,10 +38,11 @@ it('executes the registered handler on the tenant connection and returns its dep
     await executor.execute(principal, 'stocks.list', { mock: true }),
   ).toEqual({
     data: { mock: true },
+    snapshotSeq: '42',
     dependencies: [dependency],
   });
   expect(registry.get).toHaveBeenCalledWith('stocks.list');
-  expect(database.readOnlyTenantTransaction).toHaveBeenCalledWith(
+  expect(database.snapshotTenantTransaction).toHaveBeenCalledWith(
     'tenant-a',
     expect.any(Function),
   );

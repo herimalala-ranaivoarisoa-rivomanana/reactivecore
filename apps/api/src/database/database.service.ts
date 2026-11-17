@@ -87,6 +87,25 @@ export class DatabaseService implements OnModuleDestroy {
     );
   }
 
+  async snapshotTenantTransaction<T>(
+    tenantId: string,
+    callback: (client: PoolClient, snapshotSeq: string) => Promise<T>,
+  ): Promise<T> {
+    return this.readOnlyTenantTransaction(tenantId, async (client) =>
+      callback(client, await this.currentCommitSeq(client)),
+    );
+  }
+
+  async currentCommitSeq(
+    client: PoolClient | Pool = this.pool,
+  ): Promise<string> {
+    const { rows } = await client.query<{ seq: string }>(
+      'SELECT last_seq::text AS seq FROM public.reactive_commit_clock WHERE id = 1',
+    );
+    if (!rows[0]) throw new Error('Commit clock unavailable');
+    return rows[0].seq;
+  }
+
   private async withTenant<T>(
     client: PoolClient,
     tenantId: string,

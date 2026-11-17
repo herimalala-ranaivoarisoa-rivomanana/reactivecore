@@ -1,3 +1,4 @@
+import { ChangeLogModule } from './changelog/change-log.module.js';
 import { Module } from '@nestjs/common';
 import { DiscoveryModule } from '@nestjs/core';
 
@@ -14,7 +15,7 @@ import { RedisInvalidationService } from './invalidation/redis-invalidation.serv
 
 @Module({
   controllers: [ReactiveController],
-  imports: [DatabaseModule, DiscoveryModule],
+  imports: [DatabaseModule, DiscoveryModule, ChangeLogModule],
   providers: [
     QueryRegistryService,
     DependencyTrackerService,

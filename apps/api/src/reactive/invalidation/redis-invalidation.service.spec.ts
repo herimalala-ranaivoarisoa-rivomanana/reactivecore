@@ -24,8 +24,8 @@ it('validates the versioned stock event and extracts both pharmacies', () => {
     table: 'stocks',
     documentId: event.aggregateId,
     operation: 'update',
-    before: { pharmacy_id: pharmacy },
-    after: { pharmacy_id: pharmacy },
+    before: { pharmacy_id: pharmacy, quantity: 2 },
+    after: { pharmacy_id: pharmacy, quantity: 1 },
   });
   expect(
     parseStockChange(

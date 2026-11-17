@@ -62,6 +62,9 @@ export function parseStockChange(
     const row = payload[side];
     if (record(row) && uuid(row.pharmacy_id)) {
       change[side] = { pharmacy_id: row.pharmacy_id.toLowerCase() };
+      if (typeof row.quantity === 'number' && Number.isFinite(row.quantity)) {
+        change[side].quantity = row.quantity;
+      }
     }
   }
   return change;

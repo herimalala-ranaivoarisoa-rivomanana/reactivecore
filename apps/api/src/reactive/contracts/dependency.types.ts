@@ -1,3 +1,11 @@
+export type Scalar = string | number | boolean | null;
+export interface NumericRange {
+  gt?: number;
+  gte?: number;
+  lt?: number;
+  lte?: number;
+}
+
 export type Dependency =
   | {
       kind: 'document';
@@ -10,7 +18,8 @@ export type Dependency =
       tenantId: string;
       table: string;
       index: string;
-      equals: Record<string, string>;
+      equals: Record<string, Scalar>;
+      ranges?: Record<string, NumericRange>;
     }
   | {
       kind: 'table';
@@ -24,6 +33,6 @@ export interface ChangeDescriptor {
   documentId: string;
   operation: 'insert' | 'update' | 'delete';
 
-  before?: Record<string, unknown>;
-  after?: Record<string, unknown>;
+  before?: Record<string, unknown> | null;
+  after?: Record<string, unknown> | null;
 }

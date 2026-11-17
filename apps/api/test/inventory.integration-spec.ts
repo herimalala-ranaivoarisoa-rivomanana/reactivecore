@@ -1,3 +1,8 @@
+import {
+  ChangeLogService,
+  type JournalChange,
+} from '../src/reactive/changelog/change-log.service.js';
+import { RedisInvalidationService } from '../src/reactive/invalidation/redis-invalidation.service.js';
 import { Test } from '@nestjs/testing';
 import { randomUUID } from 'node:crypto';
 import { Pool } from 'pg';
@@ -42,7 +47,12 @@ const admin = new Pool({
 });
 const database = new DatabaseService(appUrl);
 const worker = new DatabaseService(workerUrl);
-const inventory = new InventoryService(database, new InventoryRepository());
+const journal = new ChangeLogService(database);
+const inventory = new InventoryService(
+  database,
+  new InventoryRepository(),
+  journal,
+);
 
 async function fixture(quantity: number) {
   const tenantId = randomUUID();
@@ -68,6 +78,7 @@ async function fixture(quantity: number) {
     );
     return {
       tenantId,
+      stockId,
       pharmacyId,
       medicineId,
       quantity: 1,
@@ -82,6 +93,7 @@ const tenants: string[] = [];
 afterEach(async () => {
   for (const tenantId of tenants.splice(0)) {
     for (const table of [
+      'reactive_change_log',
       'event_outbox',
       'mutation_receipts',
       'sales',
@@ -397,6 +409,7 @@ it('refreshes a registered stock query from the worker through Redis', async () 
       expect(listener).toHaveBeenLastCalledWith({
         subscriptionId: id,
         revision: 2,
+        snapshotSeq: expect.any(String),
         data: [],
       }),
     );
@@ -408,3 +421,196 @@ it('refreshes a registered stock query from the worker through Redis', async () 
     vi.unstubAllEnvs();
   }
 }, 10000);
+
+function journalEvent(stockId: string): JournalChange {
+  return {
+    eventId: randomUUID(),
+    documentId: stockId,
+    table: 'stocks',
+    operation: 'update',
+  };
+}
+
+it('serializes commit boundaries, groups ordinals and isolates the journal by tenant', async () => {
+  const first = await fixture(1);
+  const second = await fixture(1);
+  const before = await journal.currentSeq();
+  let unlock!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    unlock = resolve;
+  });
+  let acquired = false;
+  const a = database.tenantTransaction(first.tenantId, async (client) => {
+    const seq = await journal.append(client, [
+      journalEvent(first.stockId),
+      journalEvent(first.stockId),
+    ]);
+    acquired = true;
+    await gate;
+    return seq;
+  });
+  let b: Promise<string> | undefined;
+  try {
+    await vi.waitFor(() => expect(acquired).toBe(true));
+    let started = false;
+    let assigned = false;
+    b = database.tenantTransaction(second.tenantId, async (client) => {
+      started = true;
+      const seq = await journal.append(client, [journalEvent(second.stockId)]);
+      assigned = true;
+      return seq;
+    });
+    await vi.waitFor(() => expect(started).toBe(true));
+    expect(await journal.currentSeq()).toBe(before);
+    expect(assigned).toBe(false);
+  } finally {
+    unlock();
+    await Promise.allSettled(b ? [a, b] : [a]);
+  }
+  const [firstSeq, secondSeq] = await Promise.all([a, b!]);
+  expect(BigInt(secondSeq)).toBe(BigInt(firstSeq) + 1n);
+  const rows = await journal.readAfter(first.tenantId, before, secondSeq);
+  expect(rows.map(({ seq, ordinal }) => [seq, ordinal])).toEqual([
+    [firstSeq, 0],
+    [firstSeq, 1],
+  ]);
+  expect(
+    (await database.query('SELECT * FROM reactive_change_log')).rows,
+  ).toEqual([]);
+  await expect(
+    database.query('UPDATE reactive_commit_clock SET last_seq = 0'),
+  ).rejects.toHaveProperty('code', '42501');
+  await expect(
+    worker.query('SELECT * FROM reactive_change_log'),
+  ).rejects.toHaveProperty('code', '42501');
+});
+
+it('rolls back a journal write with its clock and keeps snapshot data aligned', async () => {
+  const command = await fixture(2);
+  const before = await journal.currentSeq();
+  await expect(
+    database.tenantTransaction(command.tenantId, async (client) => {
+      await journal.append(client, [journalEvent(command.stockId)]);
+      throw new Error('rollback journal');
+    }),
+  ).rejects.toThrow('rollback journal');
+  expect(await journal.currentSeq()).toBe(before);
+  expect(await journal.readAfter(command.tenantId, '0', before)).toEqual([]);
+
+  await database.snapshotTenantTransaction(
+    command.tenantId,
+    async (client, seq) => {
+      expect(seq).toBe(before);
+      await inventory.sell(command);
+      expect((await client.query('SELECT quantity FROM stocks')).rows).toEqual([
+        { quantity: 2 },
+      ]);
+      expect(await database.currentCommitSeq(client)).toBe(seq);
+    },
+  );
+  const after = await journal.currentSeq();
+  const [row] = await journal.readAfter(command.tenantId, before, after);
+  const outbox = await admin.query(
+    'SELECT event_id FROM event_outbox WHERE tenant_id = $1',
+    [command.tenantId],
+  );
+  expect(row).toMatchObject({
+    eventId: outbox.rows[0].event_id,
+    before: { quantity: 2 },
+    after: { quantity: 1 },
+  });
+});
+
+it('recovers journal changes on two instances with Redis delivery disabled and resnapshots after restart', async () => {
+  const command = await fixture(2);
+  const principal = {
+    tenantId: command.tenantId,
+    userId: randomUUID(),
+    roles: [],
+  };
+  const args = { pharmacyId: command.pharmacyId, availableOnly: false };
+  const open = async () => {
+    const instance = await Test.createTestingModule({
+      imports: [InventoryModule, ReactiveModule],
+    })
+      .overrideProvider(DatabaseService)
+      .useValue(new DatabaseService(appUrl))
+      .overrideProvider(RedisInvalidationService)
+      .useValue({})
+      .compile();
+    await instance.init();
+    return instance;
+  };
+  const instances = [await open()];
+  try {
+    instances.push(await open());
+    const listeners = await Promise.all(
+      instances.map(async (instance) => {
+        const listener = vi.fn();
+        await instance
+          .get(SubscriptionManagerService)
+          .subscribe(principal, 'stocks.list', args, listener);
+        return listener;
+      }),
+    );
+    await inventory.sell(command);
+    const seq = await journal.currentSeq();
+    await vi.waitFor(
+      () => {
+        for (const listener of listeners) {
+          expect(listener).toHaveBeenLastCalledWith(
+            expect.objectContaining({
+              revision: 2,
+              snapshotSeq: seq,
+              data: [expect.objectContaining({ quantity: 1 })],
+            }),
+          );
+        }
+      },
+      { timeout: 3000 },
+    );
+
+    await instances.pop()!.close();
+    const restarted = await open();
+    instances.push(restarted);
+    const fresh = vi.fn();
+    await restarted
+      .get(SubscriptionManagerService)
+      .subscribe(principal, 'stocks.list', args, fresh);
+    expect(fresh).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({
+        revision: 1,
+        snapshotSeq: seq,
+        data: [expect.objectContaining({ quantity: 1 })],
+      }),
+    );
+  } finally {
+    await Promise.all(instances.map((instance) => instance.close()));
+  }
+}, 10000);
+
+it('rolls back the entire sale if the durable journal rejects the event', async () => {
+  const command = await fixture(2);
+  const before = await journal.currentSeq();
+  const constraint = `integration_${randomUUID().replaceAll('-', '')}`;
+  await admin.query(
+    `ALTER TABLE reactive_change_log ADD CONSTRAINT ${constraint} CHECK (tenant_id <> '${command.tenantId}'::uuid) NOT VALID`,
+  );
+  try {
+    await expect(inventory.sell(command)).rejects.toHaveProperty(
+      'code',
+      '23514',
+    );
+    expect(await state(command.tenantId)).toEqual({
+      quantity: 2,
+      sales: 0,
+      receipts: 0,
+      events: 0,
+    });
+    expect(await journal.currentSeq()).toBe(before);
+  } finally {
+    await admin.query(
+      `ALTER TABLE reactive_change_log DROP CONSTRAINT ${constraint}`,
+    );
+  }
+});

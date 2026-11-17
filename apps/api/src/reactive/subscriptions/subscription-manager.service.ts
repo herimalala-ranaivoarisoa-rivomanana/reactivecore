@@ -1,11 +1,15 @@
-import { Injectable, Logger, type OnModuleDestroy } from '@nestjs/common';
+import {
+  Injectable,
+  Logger,
+  type OnModuleDestroy,
+  type OnModuleInit,
+} from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
-import type {
-  ChangeDescriptor,
-  Dependency,
-} from '../contracts/dependency.types.js';
+import { ChangeLogService } from '../changelog/change-log.service.js';
+import type { ChangeDescriptor } from '../contracts/dependency.types.js';
 import type { QueryPrincipal } from '../contracts/query-context.js';
+import { DependencyIndex } from '../engine/dependency-index.js';
 import { QueryExecutorService } from '../engine/query-executor.service.js';
 import { InvalidationService } from '../invalidation/invalidation.service.js';
 
@@ -13,6 +17,7 @@ export interface SubscriptionResult {
   subscriptionId: string;
   data: unknown;
   revision: number;
+  snapshotSeq: string;
 }
 
 interface Subscription {
@@ -20,25 +25,38 @@ interface Subscription {
   name: string;
   args: unknown;
   listener: (result: SubscriptionResult) => void;
-  dependencies: Dependency[];
   data: unknown;
   revision: number;
+  coveredSeq: string;
   generation: number;
-  running: boolean;
   dirty: boolean;
   retry?: ReturnType<typeof setTimeout>;
 }
 
 @Injectable()
-export class SubscriptionManagerService implements OnModuleDestroy {
+export class SubscriptionManagerService
+  implements OnModuleInit, OnModuleDestroy
+{
   private readonly subscriptions = new Map<string, Subscription>();
+  private readonly running = new Set<string>();
+  private readonly index: DependencyIndex;
   private readonly logger = new Logger(SubscriptionManagerService.name);
+  private timer?: ReturnType<typeof setInterval>;
+  private polling = false;
   private closed = false;
 
   constructor(
     private readonly executor: QueryExecutorService,
-    private readonly invalidation: InvalidationService,
-  ) {}
+    invalidation: InvalidationService,
+    private readonly journal: ChangeLogService,
+  ) {
+    this.index = new DependencyIndex(invalidation);
+  }
+
+  onModuleInit(): void {
+    this.timer = setInterval(() => this.reconcileAll(), 1000);
+    this.timer.unref();
+  }
 
   async subscribe(
     principal: QueryPrincipal,
@@ -53,11 +71,10 @@ export class SubscriptionManagerService implements OnModuleDestroy {
       name,
       args: structuredClone(args),
       listener,
-      dependencies: [],
       data: undefined,
       revision: 0,
+      coveredSeq: '0',
       generation: 0,
-      running: false,
       dirty: true,
     };
     this.subscriptions.set(id, subscription);
@@ -65,6 +82,7 @@ export class SubscriptionManagerService implements OnModuleDestroy {
       await this.refresh(id, subscription);
       if (!this.subscriptions.has(id))
         throw new Error('Subscription closed during initialization');
+      if (subscription.dirty) this.scheduleRefresh(id, subscription);
       return id;
     } catch (error) {
       this.unsubscribe(id);
@@ -73,23 +91,52 @@ export class SubscriptionManagerService implements OnModuleDestroy {
   }
 
   invalidate(change: ChangeDescriptor): void {
-    for (const [id, subscription] of this.subscriptions) {
-      if (subscription.principal.tenantId !== change.tenantId) continue;
-      // In-flight reads may discover dependencies absent from the previous snapshot.
-      if (
-        subscription.running ||
-        subscription.dependencies.some((dependency) =>
-          this.invalidation.affects(dependency, change),
-        )
-      ) {
-        this.markDirty(id, subscription);
-      }
+    const candidates = this.index.candidates(change);
+    // A running query may discover dependencies absent from its previous result.
+    for (const id of this.running) {
+      if (this.subscriptions.get(id)?.principal.tenantId === change.tenantId)
+        candidates.add(id);
+    }
+    for (const id of candidates) {
+      const subscription = this.subscriptions.get(id);
+      if (subscription) this.markDirty(id, subscription);
     }
   }
 
   reconcileAll(): void {
-    for (const [id, subscription] of this.subscriptions) {
-      this.markDirty(id, subscription);
+    void this.poll().catch((error: unknown) => {
+      if (!this.closed) this.logger.warn(error);
+    });
+  }
+
+  private async poll(): Promise<void> {
+    if (this.closed || this.polling || this.subscriptions.size === 0) return;
+    this.polling = true;
+    try {
+      const through = await this.journal.currentSeq();
+      for (const [id, subscription] of this.subscriptions) {
+        if (this.running.has(id) || subscription.dirty || subscription.retry)
+          continue;
+        const after = subscription.coveredSeq;
+        if (BigInt(after) >= BigInt(through)) continue;
+        // The durable recovery path deliberately ignores predicate precision.
+        const changed = await this.journal.hasChanges(
+          subscription.principal.tenantId,
+          after,
+          through,
+        );
+        if (
+          !this.subscriptions.has(id) ||
+          this.running.has(id) ||
+          subscription.dirty ||
+          subscription.coveredSeq !== after
+        )
+          continue;
+        if (changed) this.markDirty(id, subscription);
+        else subscription.coveredSeq = through;
+      }
+    } finally {
+      this.polling = false;
     }
   }
 
@@ -99,24 +146,32 @@ export class SubscriptionManagerService implements OnModuleDestroy {
     this.refreshInBackground(id, subscription);
   }
 
+  private scheduleRefresh(id: string, subscription: Subscription): void {
+    if (!this.subscriptions.has(id) || subscription.retry) return;
+    subscription.retry = setTimeout(() => {
+      subscription.retry = undefined;
+      this.refreshInBackground(id, subscription);
+    }, 1000);
+    subscription.retry.unref();
+  }
+
   private refreshInBackground(id: string, subscription: Subscription): void {
-    if (subscription.running || subscription.retry) return;
-    void this.refresh(id, subscription).catch((error: unknown) => {
-      if (!this.subscriptions.has(id)) return;
-      this.logger.warn(error);
-      subscription.dirty = true;
-      subscription.retry = setTimeout(() => {
-        subscription.retry = undefined;
-        this.refreshInBackground(id, subscription);
-      }, 1000);
-      subscription.retry.unref();
-    });
+    if (this.running.has(id) || subscription.retry) return;
+    void this.refresh(id, subscription)
+      .catch((error: unknown) => {
+        if (!this.subscriptions.has(id)) return;
+        this.logger.warn(error);
+        subscription.dirty = true;
+      })
+      .finally(() => {
+        if (subscription.dirty) this.scheduleRefresh(id, subscription);
+      });
   }
 
   private async refresh(id: string, subscription: Subscription): Promise<void> {
-    subscription.running = true;
+    this.running.add(id);
     try {
-      while (subscription.dirty && this.subscriptions.has(id)) {
+      for (let attempt = 0; attempt < 2 && subscription.dirty; attempt++) {
         subscription.dirty = false;
         const generation = subscription.generation;
         const result = await this.executor.execute(
@@ -124,10 +179,25 @@ export class SubscriptionManagerService implements OnModuleDestroy {
           subscription.name,
           subscription.args,
         );
+        // Check the journal even if Redis was offline throughout the initial read.
+        if (subscription.revision === 0 && attempt === 0) {
+          const through = await this.journal.currentSeq();
+          if (
+            await this.journal.hasChanges(
+              subscription.principal.tenantId,
+              result.snapshotSeq,
+              through,
+            )
+          ) {
+            subscription.dirty = true;
+          }
+        }
         if (!this.subscriptions.has(id)) return;
-        if (generation !== subscription.generation) continue;
+        if (generation !== subscription.generation) subscription.dirty = true;
+        if (subscription.dirty && attempt === 0) continue;
 
-        subscription.dependencies = result.dependencies;
+        this.index.replace(id, result.dependencies);
+        subscription.coveredSeq = result.snapshotSeq;
         if (
           subscription.revision === 0 ||
           !isDeepStrictEqual(subscription.data, result.data)
@@ -139,6 +209,7 @@ export class SubscriptionManagerService implements OnModuleDestroy {
               subscriptionId: id,
               data: structuredClone(result.data),
               revision: subscription.revision,
+              snapshotSeq: result.snapshotSeq,
             });
           } catch (error) {
             this.logger.warn(error);
@@ -146,17 +217,19 @@ export class SubscriptionManagerService implements OnModuleDestroy {
         }
       }
     } finally {
-      subscription.running = false;
+      this.running.delete(id);
     }
   }
 
   unsubscribe(id: string): void {
     clearTimeout(this.subscriptions.get(id)?.retry);
+    this.index.remove(id);
     this.subscriptions.delete(id);
   }
 
   onModuleDestroy(): void {
     this.closed = true;
+    clearInterval(this.timer);
     for (const id of this.subscriptions.keys()) this.unsubscribe(id);
   }
 }

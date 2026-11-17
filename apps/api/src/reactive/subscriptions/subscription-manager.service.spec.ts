@@ -1,3 +1,4 @@
+import type { ChangeLogService } from '../changelog/change-log.service.js';
 import type {
   ChangeDescriptor,
   Dependency,
@@ -33,19 +34,26 @@ function deferredQuery() {
 
 function scenario() {
   const execute = vi.fn<QueryExecutorService['execute']>();
+  const journal = {
+    currentSeq: vi.fn().mockResolvedValue('0'),
+    hasChanges: vi.fn().mockResolvedValue(false),
+  };
   const manager = new SubscriptionManagerService(
     { execute } as unknown as QueryExecutorService,
     new InvalidationService(),
+    journal as unknown as ChangeLogService,
   );
-  return { execute, manager, listener: vi.fn() };
+  return { execute, journal, manager, listener: vi.fn() };
 }
 
 it('retries an initial snapshot invalidated while it was reading', async () => {
   const { execute, manager, listener } = scenario();
   const first = deferredQuery();
-  execute
-    .mockReturnValueOnce(first.promise)
-    .mockResolvedValueOnce({ data: 2, dependencies: [dependency] });
+  execute.mockReturnValueOnce(first.promise).mockResolvedValueOnce({
+    data: 2,
+    snapshotSeq: '2',
+    dependencies: [dependency],
+  });
   const subscription = manager.subscribe(
     principal,
     'stocks.list',
@@ -53,12 +61,13 @@ it('retries an initial snapshot invalidated while it was reading', async () => {
     listener,
   );
   manager.invalidate(change);
-  first.resolve({ data: 1, dependencies: [dependency] });
+  first.resolve({ data: 1, snapshotSeq: '1', dependencies: [dependency] });
   const id = await subscription;
   expect(listener).toHaveBeenCalledExactlyOnceWith({
     subscriptionId: id,
     data: 2,
     revision: 1,
+    snapshotSeq: '2',
   });
   manager.unsubscribe(id);
 });
@@ -68,9 +77,17 @@ it('rechecks a snapshot when a change affects a newly discovered dependency', as
   const pending = deferredQuery();
   const nextDependency = { ...dependency, documentId: 'new-stock' };
   execute
-    .mockResolvedValueOnce({ data: 1, dependencies: [dependency] })
+    .mockResolvedValueOnce({
+      data: 1,
+      snapshotSeq: '1',
+      dependencies: [dependency],
+    })
     .mockReturnValueOnce(pending.promise)
-    .mockResolvedValueOnce({ data: 3, dependencies: [nextDependency] });
+    .mockResolvedValueOnce({
+      data: 3,
+      snapshotSeq: '3',
+      dependencies: [nextDependency],
+    });
   const id = await manager.subscribe(principal, 'stocks.list', {}, listener);
 
   manager.invalidate({ ...change, tenantId: 'tenant-b' });
@@ -78,12 +95,17 @@ it('rechecks a snapshot when a change affects a newly discovered dependency', as
 
   manager.invalidate(change);
   manager.invalidate({ ...change, documentId: 'new-stock' });
-  pending.resolve({ data: 2, dependencies: [nextDependency] });
+  pending.resolve({
+    data: 2,
+    snapshotSeq: '2',
+    dependencies: [nextDependency],
+  });
   await vi.waitFor(() =>
     expect(listener).toHaveBeenLastCalledWith({
       subscriptionId: id,
       data: 3,
       revision: 2,
+      snapshotSeq: '3',
     }),
   );
   expect(listener).toHaveBeenCalledTimes(2);
@@ -91,21 +113,54 @@ it('rechecks a snapshot when a change affects a newly discovered dependency', as
 });
 
 it('reconciles without emitting identical results and respects unsubscribe', async () => {
-  const { execute, manager, listener } = scenario();
+  const { execute, journal, manager, listener } = scenario();
   execute.mockResolvedValue({
     data: { a: 1, b: 2 },
+    snapshotSeq: '0',
     dependencies: [dependency],
   });
   const id = await manager.subscribe(principal, 'stocks.list', {}, listener);
   execute.mockResolvedValueOnce({
     data: { b: 2, a: 1 },
+    snapshotSeq: '1',
     dependencies: [dependency],
   });
+  journal.currentSeq.mockResolvedValue('1');
+  journal.hasChanges.mockResolvedValue(true);
   manager.reconcileAll();
-  await Promise.resolve();
-  expect(execute).toHaveBeenCalledTimes(2);
+  await vi.waitFor(() => expect(execute).toHaveBeenCalledTimes(2));
   expect(listener).toHaveBeenCalledTimes(1);
   manager.unsubscribe(id);
   manager.invalidate(change);
   expect(execute).toHaveBeenCalledTimes(2);
+});
+
+it('checks the durable journal after reading its initial snapshot, without a Redis signal', async () => {
+  const { execute, journal, manager, listener } = scenario();
+  journal.currentSeq.mockResolvedValue('11');
+  journal.hasChanges.mockResolvedValueOnce(true);
+  execute
+    .mockResolvedValueOnce({
+      data: 1,
+      snapshotSeq: '10',
+      dependencies: [dependency],
+    })
+    .mockResolvedValueOnce({
+      data: 2,
+      snapshotSeq: '11',
+      dependencies: [dependency],
+    });
+  const id = await manager.subscribe(principal, 'stocks.list', {}, listener);
+  expect(journal.hasChanges).toHaveBeenCalledWith(
+    principal.tenantId,
+    '10',
+    '11',
+  );
+  expect(listener).toHaveBeenCalledExactlyOnceWith({
+    subscriptionId: id,
+    data: 2,
+    revision: 1,
+    snapshotSeq: '11',
+  });
+  manager.unsubscribe(id);
 });
