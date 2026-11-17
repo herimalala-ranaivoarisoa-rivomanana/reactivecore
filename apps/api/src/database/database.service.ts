@@ -2,6 +2,7 @@
 import {
   Injectable,
   OnModuleDestroy,
+  Optional,
 } from "@nestjs/common";
 
 import {
@@ -15,8 +16,7 @@ import {
 export class DatabaseService implements OnModuleDestroy {
   private readonly pool: Pool;
 
-  constructor() {
-    const connectionString = process.env.DATABASE_URL;
+  constructor(@Optional() connectionString = process.env.DATABASE_URL) {
 
     if (!connectionString) {
       throw new Error("DATABASE_URL is required");
@@ -46,8 +46,9 @@ export class DatabaseService implements OnModuleDestroy {
   ): Promise<T> {
     const client = await this.pool.connect();
 
+    let discard: Error | undefined;
     try {
-      await client.query("BEGIN");
+      await client.query("BEGIN ISOLATION LEVEL READ COMMITTED");
 
       const result = await callback(client);
 
@@ -58,13 +59,32 @@ export class DatabaseService implements OnModuleDestroy {
       try {
         await client.query("ROLLBACK");
       } catch (rollbackError) {
-        console.error("Rollback failed:", rollbackError);
+        discard = new Error("Rollback failed", { cause: rollbackError });
+        console.error(discard);
       }
 
       throw error;
     } finally {
-      client.release();
+      client.release(discard);
     }
+  }
+
+  async tenantTransaction<T>(
+    tenantId: string,
+    callback: (client: PoolClient) => Promise<T>,
+  ): Promise<T> {
+    return this.transaction(async (client) => {
+      const role = await client.query<{ safe: boolean }>(
+        `SELECT current_user = 'reactivecore_app'
+                AND NOT rolsuper AND NOT rolbypassrls AS safe
+         FROM pg_roles WHERE rolname = current_user`,
+      );
+      if (!role.rows[0]?.safe) {
+        throw new Error("Inventory requires the restricted reactivecore_app role");
+      }
+      await client.query("SELECT set_config('app.tenant_id', $1::uuid::text, true)", [tenantId]);
+      return callback(client);
+    });
   }
 
   async ping(): Promise<boolean> {

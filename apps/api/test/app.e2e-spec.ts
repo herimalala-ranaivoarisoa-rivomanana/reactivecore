@@ -22,13 +22,18 @@ describe('Infrastructure health (e2e)', () => {
   });
 
   it('reports PostgreSQL and Redis as up', async () => {
-    const response = await request(app!.getHttpServer())
-      .get('/api/health')
-      .expect(200);
+    await vi.waitFor(
+      async () => {
+        const response = await request(app!.getHttpServer())
+          .get('/api/health')
+          .expect(200);
 
-    expect(response.body).toMatchObject({
-      status: 'healthy',
-      services: { postgres: 'up', redis: 'up' },
-    });
+        expect(response.body).toMatchObject({
+          status: 'healthy',
+          services: { postgres: 'up', redis: 'up' },
+        });
+      },
+      { timeout: 5000 },
+    );
   });
 });

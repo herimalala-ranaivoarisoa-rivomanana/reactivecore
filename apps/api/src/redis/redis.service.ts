@@ -26,6 +26,7 @@ export class RedisService
 
     this.client = createClient({
       url,
+      disableOfflineQueue: true,
       socket: {
         connectTimeout: 5000,
         reconnectStrategy: (retries) =>
@@ -38,8 +39,10 @@ export class RedisService
     });
   }
 
-  async onModuleInit(): Promise<void> {
-    await this.client.connect();
+  onModuleInit(): void {
+    void this.client.connect().catch((error: unknown) => {
+      console.error("Redis connection ended:", error);
+    });
   }
 
   async ping(): Promise<string> {
@@ -49,7 +52,7 @@ export class RedisService
       );
     }
 
-    return this.client.ping();
+    return this.client.withCommandOptions({ timeout: 2000 }).ping();
   }
 
   async set(
@@ -74,12 +77,12 @@ export class RedisService
     channel: string,
     message: string,
   ): Promise<number> {
-    return this.client.publish(channel, message);
+    return this.client.withCommandOptions({ timeout: 3000 }).publish(channel, message);
   }
 
   async onModuleDestroy(): Promise<void> {
     if (this.client.isOpen) {
-      await this.client.close();
+      this.client.destroy();
     }
   }
 }
