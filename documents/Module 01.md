@@ -74,17 +74,16 @@ npm run dev:web
 
 La réponse attendue contient `"status":"healthy"`, `"postgres":"up"` et `"redis":"up"`. Ouvrez ensuite `http://localhost:3000` sur la machine qui exécute le serveur. La section **Infrastructure Status** doit afficher **API: healthy**, **PostgreSQL: up** et **Redis: up**. Si la page affiche **Backend unavailable**, vérifiez d’abord que la commande `curl` atteint l’API.
 
-## 5. Lancer les tests et la compilation
+## 5. Lancer les tests
 
 Exécutez les commandes suivantes depuis la racine du dépôt. Gardez PostgreSQL et Redis démarrés pour le test de bout en bout.
 
 ```bash
 npm test
 npm run test:e2e -w @reactivecore/api
-npm run build
 ```
 
-Le test unitaire vérifie un comportement du contrôleur sans dépendre de l’infrastructure. Le test de bout en bout lance une instance NestJS, appelle `/api/health` et vérifie les réponses de PostgreSQL et Redis. La compilation vérifie le code des deux applications et produit leurs fichiers de sortie.
+Le test unitaire vérifie un comportement du contrôleur sans dépendre de l’infrastructure. Le test de bout en bout lance une instance NestJS, appelle `/api/health` et vérifie les réponses de PostgreSQL et Redis.
 
 ## 6. Comprendre les corrections
 
@@ -96,13 +95,96 @@ Le test unitaire vérifie un comportement du contrôleur sans dépendre de l’i
 
 ## 7. Observer une panne et rétablir le service
 
-Avec les deux applications démarrées, arrêtez uniquement PostgreSQL, puis interrogez de nouveau l’API.
+Gardez l’API et le serveur web démarrés. Dans un autre terminal, à la racine du dépôt, vérifiez que les deux services sont d’abord à `up`.
+
+```bash
+curl -fsS http://127.0.0.1:4000/api/health
+```
+
+### Interrompre Redis
+
+```bash
+docker compose stop redis
+curl -fsS http://127.0.0.1:4000/api/health
+```
+
+La réponse doit indiquer `degraded`, avec Redis à `down` et PostgreSQL à `up`. Si vous voyez encore `healthy`, attendez quelques secondes et relancez la requête, le temps que le client détecte la coupure.
+
+```bash
+docker compose start redis
+```
+
+Le client Redis tente de se reconnecter automatiquement. Relancez la requête de santé jusqu’à retrouver `healthy` avant de passer à PostgreSQL.
+
+### Interrompre PostgreSQL
 
 ```bash
 docker compose stop postgres
 curl -fsS http://127.0.0.1:4000/api/health
-docker compose up -d --wait
-curl -fsS http://127.0.0.1:4000/api/health
 ```
 
-Pendant la panne, l’API répond avec `"status":"degraded"`, PostgreSQL à `"down"` et Redis à `"up"`. Après le redémarrage, vérifiez que l’état revient à `"healthy"`. Pour terminer la séance, arrêtez les applications avec **Ctrl+C**, puis exécutez `docker compose down` pour arrêter les services en conservant leurs volumes.
+La réponse doit indiquer `degraded`, avec PostgreSQL à `down` et Redis à `up`. Un refus de connexion peut être immédiat. Si la connexion reste en attente, le pool applique un délai de cinq secondes pour l’établissement d’une connexion.
+
+```bash
+docker compose start postgres
+```
+
+Attendez le démarrage de PostgreSQL, puis relancez la requête de santé et vérifiez que l’état revient à `healthy`. L’API renvoie un statut HTTP 200 pendant ces exercices. C’est le champ JSON `status` qui indique si un service est indisponible.
+
+## 8. Vérifier les interfaces réseau et compiler
+
+Sous Linux, avec les applications et les conteneurs démarrés, listez les ports en écoute.
+
+```bash
+ss -ltn | grep -E ':(3000|4000|5432|6379)([[:space:]]|$)'
+docker compose ps
+```
+
+Vérifiez que PostgreSQL et Redis sont publiés sur `127.0.0.1:5432` et `127.0.0.1:6379` côté hôte. Une adresse locale `0.0.0.0` ou `[::]` indiquerait une écoute sur toutes les interfaces IPv4 ou IPv6. Lisez la colonne de l’adresse locale dans `ss`. Si Docker publie les ports sans socket d’écoute visible dans `ss`, vérifiez les adresses publiées dans `docker compose ps`.
+
+Arrêtez les serveurs de développement avec **Ctrl+C** avant de compiler afin qu’ils cessent d’écrire dans les répertoires de sortie. Depuis la racine, lancez les deux compilations.
+
+```bash
+npm run build -w @reactivecore/api
+npm run build -w @reactivecore/web
+```
+
+Les deux commandes doivent réussir avant de valider le module. Pour terminer la séance, exécutez `docker compose down` pour arrêter les services en conservant leurs volumes.
+
+## 9. Diagnostiquer les problèmes courants
+
+| Problème | Cause probable | Vérification ou correction |
+| --- | --- | --- |
+| `ECONNREFUSED` sur le port 5432 | PostgreSQL est arrêté ou le port est incorrect. | Vérifiez `docker compose ps` et le port dans `DATABASE_URL`. |
+| `NOAUTH Authentication required` | Le client Redis se connecte sans mot de passe. | Vérifiez que `REDIS_URL` contient le mot de passe configuré par `REDIS_PASSWORD`. |
+| `ECONNREFUSED` sur le port 6379 | Redis est arrêté ou le port est incorrect. | Vérifiez `docker compose ps` et le port dans `REDIS_URL`. |
+| `Nest can't resolve dependencies` | Un fournisseur manque ou son module est mal raccordé. | Vérifiez `providers`, `exports` et `imports`. |
+| `DATABASE_URL is required` | La variable manque ou le fichier `.env` est absent ou ignoré au lancement. | Vérifiez `apps/api/.env` et lancez l’API avec `npm run dev:api`. |
+| `EADDRINUSE` sur le port 4000 | Un autre processus utilise ce port. | Identifiez le processus avec `ss -ltnp 'sport = :4000'`. |
+| Next.js affiche **Backend unavailable** | L’API est inaccessible depuis le serveur web. | Testez directement `/api/health` et vérifiez `REACTIVECORE_API_URL` si vous l’avez définie. |
+| L’API démarre mais PostgreSQL est à `down` | Le pool ouvre une connexion à la première requête. | Vérifiez `/api/health` après le démarrage. Si l’application doit refuser de démarrer sans PostgreSQL, ajoutez une requête de disponibilité explicite au démarrage. |
+
+Dans ce module, NestJS attend la première connexion à Redis avant de démarrer l’API. Dans un module ultérieur, Redis deviendra optionnel pour les opérations transactionnelles qui peuvent continuer pendant une coupure. Le point de contrôle actuel `/api/health` est un prototype. Nous distinguerons ensuite `/api/health/live`, qui indique que le processus est vivant, et `/api/health/ready`, qui vérifie que les dépendances nécessaires sont disponibles.
+
+## 10. Suivre l’installation
+
+Cochez chaque étape après l’avoir vérifiée sur votre machine. Les cases servent au suivi manuel.
+
+- [ ] Monorepo npm Workspaces créé
+- [ ] Backend NestJS généré
+- [ ] Frontend Next.js 16.4 généré
+- [ ] PostgreSQL et Redis démarrés avec Docker
+- [ ] `DatabaseModule` opérationnel
+- [ ] `RedisModule` opérationnel
+- [ ] `HealthModule` répond correctement
+- [ ] Next.js affiche l’état du backend
+- [ ] Interruptions et redémarrages de PostgreSQL et Redis vérifiés
+- [ ] Compilations NestJS et Next.js réussies
+
+## Prochain module — Conception transactionnelle
+
+Nous construirons le schéma PostgreSQL multi-tenant, les repositories NestJS et leurs transactions. Nous ajouterons les contrôles de concurrence, l’idempotence, la *transactional outbox*, le journal des mutations, les premières fonctions `query()` et `mutation()`, puis les tests de concurrence avec plusieurs clients.
+
+Deux cas serviront de fil conducteur. Nous empêcherons deux ventes simultanées de faire passer le stock sous zéro et vérifierons qu’une mutation validée peut être transmise aux abonnés après un redémarrage du serveur.
+
+Le Module 01 met en place le socle NestJS, Next.js, PostgreSQL et Redis qui servira à développer progressivement des fonctionnalités inspirées de Convex.
