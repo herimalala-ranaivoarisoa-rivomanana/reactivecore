@@ -9,7 +9,7 @@ process.chdir(root);
 const project = 'reactivecore-module05';
 const file = '.env.module05-lab';
 const [action, flag] = process.argv.slice(2);
-const actions = ['setup', 'reset-test', 'api', 'worker', 'test', 'load', 'status'];
+const actions = ['setup', 'reset-test', 'api', 'worker', 'test', 'load', 'status', 'platform-setup', 'platform-inventory', 'platform-tasks', 'platform-worker-tasks'];
 if (!actions.includes(action) || (action === 'reset-test' ? flag !== '--yes' : flag !== undefined)) {
   throw new Error(`Usage: node scripts/module05-lab.mjs ${actions.join('|')} (reset-test requires --yes)`);
 }
@@ -70,12 +70,12 @@ const migrations = [
   '001_initial.sql', '002_rls.sql', '003_roles.sql', '004_commit_log.sql', '005_mutation_engine.sql',
 ];
 
-function migrate(database) {
+function migrate(database, files = migrations, directory = 'db/migrations') {
   psql(database, 'CREATE TABLE IF NOT EXISTS public.lab_schema_migrations (name text PRIMARY KEY);');
   const applied = new Set(psql(database, 'SELECT name FROM public.lab_schema_migrations;', true).split('\n'));
-  for (const migration of migrations) {
+  for (const migration of files) {
     if (applied.has(migration)) continue;
-    const source = readFileSync(`db/migrations/${migration}`, 'utf8');
+    const source = readFileSync(`${directory}/${migration}`, 'utf8');
     if (!/COMMIT;\s*$/.test(source)) throw new Error(`Missing final COMMIT in ${migration}`);
     psql(database, source.replace(/COMMIT;\s*$/, `INSERT INTO public.lab_schema_migrations VALUES ('${migration}');\nCOMMIT;\n`));
     console.log(`${database}: ${migration}`);
@@ -113,6 +113,37 @@ ALTER ROLE reactivecore_worker LOGIN PASSWORD :'worker_password';
       psql(config.POSTGRES_DB, readFileSync(`db/seeds/${seed}`, 'utf8'));
     }
     break;
+  case 'platform-setup':
+    if (psql('postgres', "SELECT 1 FROM pg_database WHERE datname = 'reactivecore_tasks';", true) !== '1') {
+      psql('postgres', 'CREATE DATABASE reactivecore_tasks;');
+    }
+    migrate('reactivecore_tasks');
+    migrate('reactivecore_tasks', ['001_tasks.sql'], 'db/projects/tasks');
+    psql('reactivecore_tasks', readFileSync('db/seeds/001_demo.sql', 'utf8'));
+    break;
+  case 'platform-worker-tasks':
+    run('node', ['apps/api/dist/outbox/outbox.worker.js'], {
+      extra: { DATABASE_URL: worker('reactivecore_tasks'), REDIS_URL: redis, RC_INVALIDATION_CHANNEL: 'reactivecore:lab:tasks' },
+    });
+    break;
+  case 'platform-inventory':
+  case 'platform-tasks': {
+    const tasks = action === 'platform-tasks';
+    run('node', ['apps/api/dist/platform-main.js'], { extra: {
+      NODE_ENV: 'development',
+      RC_APPLICATION: tasks ? 'tasks' : 'inventory',
+      RC_JWT_ISSUER: 'urn:reactivecore:lab',
+      RC_JWT_AUDIENCE: tasks ? 'tasks:lab' : 'inventory:lab',
+      RC_JWT_DEV_SECRET: config.DEV_API_TOKEN,
+      RC_JWKS_URL: '',
+      RC_HOST: '127.0.0.1',
+      PORT: tasks ? '4402' : '4401',
+      DATABASE_URL: tasks ? app('reactivecore_tasks') : app(),
+      REDIS_URL: redis,
+      RC_INVALIDATION_CHANNEL: tasks ? 'reactivecore:lab:tasks' : 'reactivecore:invalidation',
+    } });
+    break;
+  }
   case 'reset-test': {
     const marker = "SELECT to_regclass('public.lab_schema_migrations') IS NOT NULL;";
     if (psql(config.POSTGRES_DB, marker, true) !== 't') throw new Error('Lab migration marker missing');

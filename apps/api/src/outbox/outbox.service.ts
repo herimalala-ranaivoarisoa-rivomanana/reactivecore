@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { DatabaseService } from '../database/database.service.js';
 import { RedisService } from '../redis/redis.service.js';
 
-import { INVALIDATION_CHANNEL } from './invalidation-channel.js';
+import { invalidationChannel } from './invalidation-channel.js';
 
 interface OutboxEvent {
   event_id: string;
@@ -42,7 +42,7 @@ export class OutboxService {
 
     try {
       await this.redis.publish(
-        INVALIDATION_CHANNEL,
+        invalidationChannel(),
         JSON.stringify({
           eventId: event.event_id,
           tenantId: event.tenant_id,

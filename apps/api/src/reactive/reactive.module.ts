@@ -10,12 +10,10 @@ import { QueryExecutorService } from './engine/query-executor.service.js';
 import { InvalidationService } from './invalidation/invalidation.service.js';
 import { SubscriptionManagerService } from './subscriptions/subscription-manager.service.js';
 
-import { ReactiveController } from './reactive.controller.js';
-import { ReactiveStreamController } from './reactive-stream.controller.js';
+import { ReactiveStreamService } from './reactive-stream.service.js';
 import { RedisInvalidationService } from './invalidation/redis-invalidation.service.js';
 
 @Module({
-  controllers: [ReactiveController, ReactiveStreamController],
   imports: [DatabaseModule, DiscoveryModule, ChangeLogModule],
   providers: [
     QueryRegistryService,
@@ -24,11 +22,13 @@ import { RedisInvalidationService } from './invalidation/redis-invalidation.serv
     InvalidationService,
     SubscriptionManagerService,
     RedisInvalidationService,
+    ReactiveStreamService,
   ],
   exports: [
     QueryExecutorService,
     SubscriptionManagerService,
     InvalidationService,
+    ReactiveStreamService,
   ],
 })
 export class ReactiveModule {}

@@ -6,7 +6,7 @@ import {
 } from '@nestjs/common';
 import { isUUID } from 'class-validator';
 import { createClient, type RedisClientType } from 'redis';
-import { INVALIDATION_CHANNEL } from '../../outbox/invalidation-channel.js';
+import { invalidationChannel } from '../../outbox/invalidation-channel.js';
 import type { ChangeDescriptor } from '../contracts/dependency.types.js';
 import { SubscriptionManagerService } from '../subscriptions/subscription-manager.service.js';
 
@@ -105,6 +105,22 @@ export class RedisInvalidationService implements OnModuleInit, OnModuleDestroy {
   private readonly receive = (message: string): void => {
     const change = parseStockChange(message);
     if (change) this.subscriptions.invalidate(change);
+    else {
+      // New application modules can use the durable journal without a custom Redis parser.
+      try {
+        const event: unknown = JSON.parse(message);
+        if (
+          record(event) &&
+          event.type === 'reactive.changed' &&
+          uuid(event.eventId) &&
+          uuid(event.tenantId) &&
+          uuid(event.aggregateId)
+        )
+          this.subscriptions.reconcileAll();
+      } catch {
+        // Redis is only a wake-up signal; the journal poll remains authoritative.
+      }
+    }
   };
 
   private async subscribe(client: RedisClientType): Promise<void> {
@@ -117,7 +133,7 @@ export class RedisInvalidationService implements OnModuleInit, OnModuleDestroy {
       return;
     this.subscribing = true;
     try {
-      await client.subscribe(INVALIDATION_CHANNEL, this.receive);
+      await client.subscribe(invalidationChannel(), this.receive);
       if (this.client !== client) return;
       this.subscribed = true;
       this.subscriptions.reconcileAll();
