@@ -6,7 +6,7 @@ import {
 } from '@nestjs/common';
 import { createHash, randomUUID, randomInt } from 'node:crypto';
 import { setTimeout } from 'node:timers/promises';
-import { isUUID } from 'class-validator';
+import { isIdempotencyKey } from './idempotency-key.js';
 import type { PoolClient } from 'pg';
 import { DatabaseService } from '../database/database.service.js';
 import type { JournalChange } from '../reactive/changelog/change-log.service.js';
@@ -39,6 +39,17 @@ function canonicalJson(value: unknown): string {
 
 @Injectable()
 export class MutationEngineService {
+  private readonly metrics = {
+    serializationFailures: 0,
+    deadlocks: 0,
+    retries: 0,
+    exhausted: 0,
+  };
+
+  retryMetrics() {
+    return { ...this.metrics };
+  }
+
   constructor(
     private readonly database: DatabaseService,
     private readonly registry: MutationRegistryService,
@@ -55,12 +66,16 @@ export class MutationEngineService {
       } catch (error) {
         const code = (error as { code?: string } | null)?.code;
         if (code !== '40001' && code !== '40P01') throw error;
+        if (code === '40001') this.metrics.serializationFailures++;
+        else this.metrics.deadlocks++;
         if (attempt >= 5) {
+          this.metrics.exhausted++;
           throw new ServiceUnavailableException(
             'Transaction retry limit exhausted',
             { cause: error },
           );
         }
+        this.metrics.retries++;
         await setTimeout(randomInt(10, 21) * 2 ** attempt);
       }
     }
@@ -72,7 +87,7 @@ export class MutationEngineService {
     args,
     idempotencyKey,
   }: MutationRequest): Promise<MutationResult> {
-    if (typeof idempotencyKey !== 'string' || !isUUID(idempotencyKey)) {
+    if (!isIdempotencyKey(idempotencyKey)) {
       throw new BadRequestException('Idempotency-Key must be a UUID');
     }
     const handler = this.registry.get(name);

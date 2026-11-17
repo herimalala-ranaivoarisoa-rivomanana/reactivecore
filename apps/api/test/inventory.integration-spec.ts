@@ -813,3 +813,90 @@ it('rolls back both balances and the scoped receipt if the journal fails', async
   }
   expect((await mutationEngine.execute(request)).replayed).toBe(false);
 });
+
+it('redelivers the same event after publication succeeds but acknowledgment fails', async () => {
+  const command = await fixture(2);
+  await inventory.sell(command);
+  const publisher = createClient({ url: redisUrl, disableOfflineQueue: true });
+  const subscriber = publisher.duplicate();
+  publisher.on('error', () => {});
+  subscriber.on('error', () => {});
+  try {
+    await Promise.all([publisher.connect(), subscriber.connect()]);
+    const messages: string[] = [];
+    await subscriber.subscribe(INVALIDATION_CHANNEL, (message) => {
+      if (JSON.parse(message).tenantId === command.tenantId)
+        messages.push(message);
+    });
+    const redis = {
+      publish: publisher.publish.bind(publisher),
+    } as unknown as RedisService;
+    const workerWithFailedAck = {
+      query: (sql: string, params: unknown[]) => {
+        if (sql.includes('SET published_at'))
+          throw new Error('Simulated interruption before acknowledgment');
+        return worker.query(sql, params);
+      },
+    } as unknown as DatabaseService;
+    await expect(
+      new OutboxService(workerWithFailedAck, redis).publishNext(),
+    ).rejects.toThrow('Simulated interruption before acknowledgment');
+    await vi.waitFor(() => expect(messages).toHaveLength(1));
+    const pending = await admin.query(
+      'SELECT published_at, attempts FROM event_outbox WHERE tenant_id = $1',
+      [command.tenantId],
+    );
+    expect(pending.rows).toEqual([{ published_at: null, attempts: 1 }]);
+
+    // Make the lease expire deterministically, as it would after a worker restart.
+    await admin.query(
+      "UPDATE event_outbox SET available_at = now() - interval '1 second' WHERE tenant_id = $1",
+      [command.tenantId],
+    );
+    expect(await new OutboxService(worker, redis).publishNext()).toBe(true);
+    await vi.waitFor(() => expect(messages).toHaveLength(2));
+    expect(JSON.parse(messages[0]).eventId).toEqual(
+      JSON.parse(messages[1]).eventId,
+    );
+    const acknowledged = await admin.query(
+      'SELECT published_at, attempts FROM event_outbox WHERE tenant_id = $1',
+      [command.tenantId],
+    );
+    expect(acknowledged.rows).toEqual([
+      { published_at: expect.any(Date), attempts: 2 },
+    ]);
+    expect(await state(command.tenantId)).toEqual({
+      quantity: 1,
+      sales: 1,
+      receipts: 1,
+      events: 1,
+    });
+  } finally {
+    if (subscriber.isOpen) subscriber.destroy();
+    if (publisher.isOpen) publisher.destroy();
+  }
+}, 10000);
+
+it('conserves twenty units during thirty concurrent transfer attempts', async () => {
+  const request = await transferFixture(20, 0);
+  const results = await Promise.allSettled(
+    Array.from({ length: 30 }, () =>
+      mutationEngine.execute({ ...request, idempotencyKey: randomUUID() }),
+    ),
+  );
+  const successes = results.filter(
+    (result) => result.status === 'fulfilled',
+  ).length;
+  expect(successes).toBeGreaterThan(0);
+  expect(successes).toBeLessThanOrEqual(20);
+  for (const result of results) {
+    if (result.status === 'rejected')
+      expect([409, 503]).toContain(result.reason.status);
+  }
+  expect(await transferState(request.principal.tenantId)).toEqual({
+    quantities: [20 - successes, successes].sort((a, b) => a - b),
+    receipts: successes,
+    journal: successes * 2,
+    events: successes * 2,
+  });
+}, 15000);

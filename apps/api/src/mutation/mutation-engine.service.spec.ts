@@ -23,6 +23,12 @@ it('retries the whole transaction on serialization failures and deadlocks', asyn
   await expect(engine.runSerializable('tenant', write)).resolves.toBe(
     'committed',
   );
+  expect(engine.retryMetrics()).toEqual({
+    serializationFailures: 1,
+    deadlocks: 1,
+    retries: 2,
+    exhausted: 0,
+  });
   expect(serializableTenantTransaction.mock.calls).toEqual(
     Array.from({ length: 3 }, () => ['tenant', write]),
   );
@@ -43,4 +49,10 @@ it('bounds retries and reports an exhausted transaction as unavailable', async (
     engine.runSerializable('tenant', vi.fn()),
   ).rejects.toHaveProperty('status', 503);
   expect(serializableTenantTransaction).toHaveBeenCalledTimes(6);
+  expect(engine.retryMetrics()).toEqual({
+    serializationFailures: 6,
+    deadlocks: 0,
+    retries: 5,
+    exhausted: 1,
+  });
 });

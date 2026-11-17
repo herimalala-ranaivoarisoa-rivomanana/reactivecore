@@ -8,7 +8,7 @@ import {
   UseGuards,
   ValidationPipe,
 } from '@nestjs/common';
-import { isUUID } from 'class-validator';
+import { isIdempotencyKey } from '../mutation/idempotency-key.js';
 import {
   DevelopmentAuthGuard,
   DevelopmentPrincipal,
@@ -36,7 +36,7 @@ export class InventoryController {
     @DevelopmentPrincipal() principal: QueryPrincipal,
     @Headers('idempotency-key') key?: string,
   ) {
-    if (!key || !isUUID(key)) {
+    if (!isIdempotencyKey(key)) {
       throw new BadRequestException('Idempotency-Key must be a UUID');
     }
     return this.inventory.sell({

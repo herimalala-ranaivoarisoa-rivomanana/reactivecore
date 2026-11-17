@@ -2,6 +2,8 @@
 
 Le [Module 04](Module%2004.md) relie les snapshots des requêtes au journal PostgreSQL. Le Module 05 ajoute un moteur qui exécute une commande, la protège contre les rejeux et valide ensemble les écritures métier, le journal et l’outbox.
 
+Pour une installation autonome avec des bases et des ports séparés, suivez le [laboratoire consolidé](Module%2005%20consolid%C3%A9.md).
+
 ## 1. Préparer les bases du laboratoire
 
 Sur des bases déjà au Module 04, appliquez uniquement `005_mutation_engine.sql`. Sur des bases neuves, appliquez les migrations 001 à 005 dans l’ordre. Conservez les rôles et les fichiers d’environnement du [Module 02](Module%2002.md).
