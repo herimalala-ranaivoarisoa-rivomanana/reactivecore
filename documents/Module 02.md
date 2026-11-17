@@ -95,7 +95,7 @@ Le tenant de démonstration est fixé côté serveur. `POST /api/inventory/sell`
 4. La vente, le reçu et l’événement `stock.updated` sont enregistrés sur la même connexion et deviennent visibles au même commit.
 5. Si le stock est insuffisant ou si une écriture échoue, PostgreSQL annule toutes les écritures de la transaction.
 
-Le reçu conserve le même `saleId` lors d’un rejeu. Une tentative refusée pour stock insuffisant est annulée avec son reçu et peut être retentée après réapprovisionnement. La version du stock est une chaîne JSON pour préserver la précision du `BIGINT` PostgreSQL.
+Le reçu conserve le même `saleId` lors d’un rejeu. Au stade du Module 02, une tentative refusée pour stock insuffisant est annulée avec son reçu. Le [Module 03](Module%2003.md) fait évoluer ce comportement en mémorisant ce refus sous la même clé. La version du stock est une chaîne JSON pour préserver la précision du `BIGINT` PostgreSQL.
 
 ### Essayer la route
 

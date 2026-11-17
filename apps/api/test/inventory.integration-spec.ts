@@ -1,9 +1,15 @@
+import { Test } from '@nestjs/testing';
 import { randomUUID } from 'node:crypto';
 import { Pool } from 'pg';
 import { createClient } from 'redis';
 import { setTimeout } from 'node:timers/promises';
 import { DatabaseService } from '../src/database/database.service.js';
 import { InventoryRepository } from '../src/inventory/inventory.repository.js';
+import { InventoryModule } from '../src/inventory/inventory.module.js';
+import { ReactiveModule } from '../src/reactive/reactive.module.js';
+import { QueryExecutorService } from '../src/reactive/engine/query-executor.service.js';
+import { SubscriptionManagerService } from '../src/reactive/subscriptions/subscription-manager.service.js';
+import { INVALIDATION_CHANNEL } from '../src/outbox/invalidation-channel.js';
 import { InventoryService } from '../src/inventory/inventory.service.js';
 import type { RedisService } from '../src/redis/redis.service.js';
 import { OutboxService } from '../src/outbox/outbox.service.js';
@@ -127,7 +133,7 @@ it('allows only one concurrent sale of the last unit', async () => {
   expect(await state(command.tenantId)).toEqual({
     quantity: 0,
     sales: 1,
-    receipts: 1,
+    receipts: 2,
     events: 1,
   });
 });
@@ -282,3 +288,123 @@ it('reclaims an abandoned outbox lease after it expires', async () => {
     lease_token: null,
   });
 });
+
+it('replays an insufficient-stock decision even after restocking', async () => {
+  const command = await fixture(0);
+  await expect(inventory.sell(command)).rejects.toHaveProperty('status', 409);
+  await admin.query('UPDATE stocks SET quantity = 3 WHERE tenant_id = $1', [
+    command.tenantId,
+  ]);
+  await expect(inventory.sell(command)).rejects.toHaveProperty('status', 409);
+  expect(await state(command.tenantId)).toEqual({
+    quantity: 3,
+    sales: 0,
+    receipts: 1,
+    events: 0,
+  });
+});
+
+it('reads a stable tenant snapshot and blocks writes in a query transaction', async () => {
+  const command = await fixture(3);
+  await fixture(7);
+  await database.readOnlyTenantTransaction(command.tenantId, async (client) => {
+    const first = await client.query('SELECT quantity FROM stocks');
+    expect(first.rows).toEqual([{ quantity: 3 }]);
+    await admin.query('UPDATE stocks SET quantity = 2 WHERE tenant_id = $1', [
+      command.tenantId,
+    ]);
+    expect((await client.query('SELECT quantity FROM stocks')).rows).toEqual(
+      first.rows,
+    );
+  });
+  await expect(
+    database.readOnlyTenantTransaction(command.tenantId, (client) =>
+      client.query('UPDATE stocks SET quantity = 4'),
+    ),
+  ).rejects.toHaveProperty('code', '25006');
+  expect((await database.query('SELECT id FROM stocks')).rows).toEqual([]);
+});
+
+it('refreshes a registered stock query from the worker through Redis', async () => {
+  const command = await fixture(1);
+  const other = await fixture(3);
+  const publisher = createClient({ url: redisUrl, disableOfflineQueue: true });
+  publisher.on('error', () => {});
+  vi.stubEnv('REDIS_URL', redisUrl);
+  const module = await Test.createTestingModule({
+    imports: [InventoryModule, ReactiveModule],
+  })
+    .overrideProvider(DatabaseService)
+    .useValue(new DatabaseService(appUrl))
+    .compile();
+  try {
+    await publisher.connect();
+    const count = async () =>
+      Number(
+        (await publisher.pubSubNumSub(INVALIDATION_CHANNEL))[
+          INVALIDATION_CHANNEL
+        ] ?? 0,
+      );
+    const original = await count();
+    await module.init();
+    await vi.waitFor(async () =>
+      expect(await count()).toBeGreaterThan(original),
+    );
+
+    const executor = module.get(QueryExecutorService);
+    const subscriptions = module.get(SubscriptionManagerService);
+    const principal = {
+      tenantId: command.tenantId,
+      userId: randomUUID(),
+      roles: [],
+    };
+    const args = { pharmacyId: command.pharmacyId, availableOnly: true };
+    await expect(
+      executor.execute(principal, 'unknown.query', args),
+    ).rejects.toHaveProperty('status', 404);
+    await expect(
+      executor.execute(principal, 'stocks.list', {
+        ...args,
+        availableOnly: 'true',
+      }),
+    ).rejects.toHaveProperty('status', 400);
+    const initial = await executor.execute(principal, 'stocks.list', args);
+    expect(initial.dependencies).toMatchObject([
+      { kind: 'predicate', equals: { pharmacy_id: command.pharmacyId } },
+    ]);
+    expect(initial.data).toMatchObject([{ quantity: 1 }]);
+
+    const listener = vi.fn();
+    const otherListener = vi.fn();
+    const id = await subscriptions.subscribe(
+      principal,
+      'stocks.list',
+      args,
+      listener,
+    );
+    await subscriptions.subscribe(
+      { ...principal, tenantId: other.tenantId },
+      'stocks.list',
+      { ...args, pharmacyId: other.pharmacyId },
+      otherListener,
+    );
+    await inventory.sell(command);
+    const outbox = new OutboxService(worker, {
+      publish: publisher.publish.bind(publisher),
+    } as unknown as RedisService);
+    expect(await outbox.publishNext()).toBe(true);
+    await vi.waitFor(() =>
+      expect(listener).toHaveBeenLastCalledWith({
+        subscriptionId: id,
+        revision: 2,
+        data: [],
+      }),
+    );
+    expect(listener).toHaveBeenCalledTimes(2);
+    expect(otherListener).toHaveBeenCalledTimes(1);
+  } finally {
+    await module.close();
+    if (publisher.isOpen) publisher.destroy();
+    vi.unstubAllEnvs();
+  }
+}, 10000);

@@ -5,19 +5,20 @@ import {
   Headers,
   HttpCode,
   Post,
-  ServiceUnavailableException,
-  UnauthorizedException,
+  UseGuards,
   ValidationPipe,
 } from '@nestjs/common';
 import { isUUID } from 'class-validator';
-import { createHash, timingSafeEqual } from 'node:crypto';
+import {
+  DevelopmentAuthGuard,
+  DevelopmentPrincipal,
+} from '../auth/development-auth.guard.js';
+import type { QueryPrincipal } from '../reactive/contracts/query-context.js';
 import { InventoryService } from './inventory.service.js';
 import { SellMedicineDto } from './sell-medicine.dto.js';
 
-const demoTenantId = '11111111-1111-4111-8111-111111111111';
-const digest = (value: string) => createHash('sha256').update(value).digest();
-
 @Controller('inventory')
+@UseGuards(DevelopmentAuthGuard)
 export class InventoryController {
   constructor(private readonly inventory: InventoryService) {}
 
@@ -32,23 +33,14 @@ export class InventoryController {
       }),
     )
     body: SellMedicineDto,
+    @DevelopmentPrincipal() principal: QueryPrincipal,
     @Headers('idempotency-key') key?: string,
-    @Headers('x-dev-token') token?: string,
   ) {
-    const expected = process.env.DEV_API_TOKEN;
-    if (process.env.NODE_ENV !== 'development' || !expected) {
-      throw new ServiceUnavailableException(
-        'Development inventory endpoint disabled',
-      );
-    }
-    if (!token || !timingSafeEqual(digest(token), digest(expected))) {
-      throw new UnauthorizedException('Invalid development token');
-    }
     if (!key || !isUUID(key)) {
       throw new BadRequestException('Idempotency-Key must be a UUID');
     }
     return this.inventory.sell({
-      tenantId: demoTenantId,
+      tenantId: principal.tenantId,
       pharmacyId: body.pharmacyId.toLowerCase(),
       medicineId: body.medicineId.toLowerCase(),
       quantity: body.quantity,

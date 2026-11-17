@@ -3,6 +3,8 @@ import { randomUUID } from 'node:crypto';
 import { DatabaseService } from '../database/database.service.js';
 import { RedisService } from '../redis/redis.service.js';
 
+import { INVALIDATION_CHANNEL } from './invalidation-channel.js';
+
 interface OutboxEvent {
   event_id: string;
   tenant_id: string;
@@ -40,7 +42,7 @@ export class OutboxService {
 
     try {
       await this.redis.publish(
-        'reactivecore:invalidation',
+        INVALIDATION_CHANNEL,
         JSON.stringify({
           eventId: event.event_id,
           tenantId: event.tenant_id,

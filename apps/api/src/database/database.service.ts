@@ -1,25 +1,14 @@
+import { Injectable, OnModuleDestroy, Optional } from '@nestjs/common';
 
-import {
-  Injectable,
-  OnModuleDestroy,
-  Optional,
-} from "@nestjs/common";
-
-import {
-  Pool,
-  PoolClient,
-  QueryResult,
-  QueryResultRow,
-} from "pg";
+import { Pool, PoolClient, QueryResult, QueryResultRow } from 'pg';
 
 @Injectable()
 export class DatabaseService implements OnModuleDestroy {
   private readonly pool: Pool;
 
   constructor(@Optional() connectionString = process.env.DATABASE_URL) {
-
     if (!connectionString) {
-      throw new Error("DATABASE_URL is required");
+      throw new Error('DATABASE_URL is required');
     }
 
     this.pool = new Pool({
@@ -29,8 +18,8 @@ export class DatabaseService implements OnModuleDestroy {
       connectionTimeoutMillis: 5000,
     });
 
-    this.pool.on("error", (error) => {
-      console.error("Idle PostgreSQL client error:", error);
+    this.pool.on('error', (error) => {
+      console.error('Idle PostgreSQL client error:', error);
     });
   }
 
@@ -44,22 +33,32 @@ export class DatabaseService implements OnModuleDestroy {
   async transaction<T>(
     callback: (client: PoolClient) => Promise<T>,
   ): Promise<T> {
+    return this.runTransaction(
+      'BEGIN ISOLATION LEVEL READ COMMITTED',
+      callback,
+    );
+  }
+
+  private async runTransaction<T>(
+    begin: string,
+    callback: (client: PoolClient) => Promise<T>,
+  ): Promise<T> {
     const client = await this.pool.connect();
 
     let discard: Error | undefined;
     try {
-      await client.query("BEGIN ISOLATION LEVEL READ COMMITTED");
+      await client.query(begin);
 
       const result = await callback(client);
 
-      await client.query("COMMIT");
+      await client.query('COMMIT');
 
       return result;
     } catch (error) {
       try {
-        await client.query("ROLLBACK");
+        await client.query('ROLLBACK');
       } catch (rollbackError) {
-        discard = new Error("Rollback failed", { cause: rollbackError });
+        discard = new Error('Rollback failed', { cause: rollbackError });
         console.error(discard);
       }
 
@@ -73,24 +72,47 @@ export class DatabaseService implements OnModuleDestroy {
     tenantId: string,
     callback: (client: PoolClient) => Promise<T>,
   ): Promise<T> {
-    return this.transaction(async (client) => {
-      const role = await client.query<{ safe: boolean }>(
-        `SELECT current_user = 'reactivecore_app'
-                AND NOT rolsuper AND NOT rolbypassrls AS safe
-         FROM pg_roles WHERE rolname = current_user`,
+    return this.transaction((client) =>
+      this.withTenant(client, tenantId, callback),
+    );
+  }
+
+  async readOnlyTenantTransaction<T>(
+    tenantId: string,
+    callback: (client: PoolClient) => Promise<T>,
+  ): Promise<T> {
+    return this.runTransaction(
+      'BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY',
+      (client) => this.withTenant(client, tenantId, callback),
+    );
+  }
+
+  private async withTenant<T>(
+    client: PoolClient,
+    tenantId: string,
+    callback: (client: PoolClient) => Promise<T>,
+  ): Promise<T> {
+    await client.query("SET LOCAL statement_timeout = '5s'");
+    await client.query("SET LOCAL lock_timeout = '2s'");
+    const role = await client.query<{ safe: boolean }>(
+      `SELECT current_user = 'reactivecore_app'
+              AND NOT rolsuper AND NOT rolbypassrls AS safe
+       FROM pg_roles WHERE rolname = current_user`,
+    );
+    if (!role.rows[0]?.safe) {
+      throw new Error(
+        'Tenant transactions require the restricted reactivecore_app role',
       );
-      if (!role.rows[0]?.safe) {
-        throw new Error("Inventory requires the restricted reactivecore_app role");
-      }
-      await client.query("SELECT set_config('app.tenant_id', $1::uuid::text, true)", [tenantId]);
-      return callback(client);
-    });
+    }
+    await client.query(
+      "SELECT set_config('app.tenant_id', $1::uuid::text, true)",
+      [tenantId],
+    );
+    return callback(client);
   }
 
   async ping(): Promise<boolean> {
-    const result = await this.query(
-      "SELECT 1 AS connected",
-    );
+    const result = await this.query('SELECT 1 AS connected');
 
     return result.rows[0]?.connected === 1;
   }

@@ -5,11 +5,14 @@ import {
 } from '@nestjs/common';
 
 import { createHash, randomUUID } from 'node:crypto';
+import type { PoolClient } from 'pg';
 
 import { DatabaseService } from '../database/database.service.js';
 import { InventoryRepository } from './inventory.repository.js';
 
 import type { SellMedicineCommand, SaleResult } from './inventory.types.js';
+
+type SaleOutcome = SaleResult | { rejected: 'insufficient_stock' };
 
 @Injectable()
 export class InventoryService {
@@ -42,9 +45,11 @@ export class InventoryService {
       .update(canonicalRequest)
       .digest('hex');
 
-    return this.database.tenantTransaction(tenantId, async (client) => {
-      const receiptInsert = await client.query(
-        `
+    const outcome = await this.database.tenantTransaction<SaleOutcome>(
+      tenantId,
+      async (client) => {
+        const receiptInsert = await client.query(
+          `
           INSERT INTO mutation_receipts (
             tenant_id,
             idempotency_key,
@@ -54,71 +59,73 @@ export class InventoryService {
           ON CONFLICT DO NOTHING
           RETURNING idempotency_key
           `,
-        [tenantId, idempotencyKey, requestHash],
-      );
+          [tenantId, idempotencyKey, requestHash],
+        );
 
-      if (receiptInsert.rowCount === 0) {
-        const previous = await client.query<{
-          request_hash: string;
-          result: SaleResult | null;
-        }>(
-          `
+        if (receiptInsert.rowCount === 0) {
+          const previous = await client.query<{
+            request_hash: string;
+            result: SaleOutcome | null;
+          }>(
+            `
             SELECT request_hash, result
             FROM mutation_receipts
             WHERE tenant_id = $1
               AND idempotency_key = $2
             `,
-          [tenantId, idempotencyKey],
+            [tenantId, idempotencyKey],
+          );
+
+          const receipt = previous.rows[0];
+
+          if (!receipt) {
+            throw new ConflictException('Idempotency receipt unavailable');
+          }
+
+          if (receipt.request_hash !== requestHash) {
+            throw new ConflictException(
+              'Idempotency key reused with different arguments',
+            );
+          }
+
+          if (!receipt.result) {
+            throw new ConflictException('Mutation result unavailable');
+          }
+
+          return receipt.result;
+        }
+
+        const stock = await this.repository.decrementStock(
+          client,
+          tenantId,
+          pharmacyId,
+          medicineId,
+          quantity,
         );
 
-        const receipt = previous.rows[0];
-
-        if (!receipt) {
-          throw new ConflictException('Idempotency receipt unavailable');
+        if (!stock) {
+          const refusal = { rejected: 'insufficient_stock' } as const;
+          await this.saveReceipt(client, command, refusal);
+          return refusal;
         }
 
-        if (receipt.request_hash !== requestHash) {
-          throw new ConflictException(
-            'Idempotency key reused with different arguments',
-          );
-        }
+        const saleId = await this.repository.createSale(
+          client,
+          tenantId,
+          pharmacyId,
+          medicineId,
+          quantity,
+        );
 
-        if (!receipt.result) {
-          throw new ConflictException('Mutation result unavailable');
-        }
+        const result: SaleResult = {
+          saleId,
+          stockId: stock.id,
+          remainingQuantity: stock.quantity,
+          stockVersion: stock.version,
+        };
 
-        return receipt.result;
-      }
-
-      const stock = await this.repository.decrementStock(
-        client,
-        tenantId,
-        pharmacyId,
-        medicineId,
-        quantity,
-      );
-
-      if (!stock) {
-        throw new ConflictException('Insufficient stock or stock not found');
-      }
-
-      const saleId = await this.repository.createSale(
-        client,
-        tenantId,
-        pharmacyId,
-        medicineId,
-        quantity,
-      );
-
-      const result: SaleResult = {
-        saleId,
-        stockId: stock.id,
-        remainingQuantity: stock.quantity,
-        stockVersion: stock.version,
-      };
-
-      await client.query(
-        `
+        await client.query(
+          `
           INSERT INTO event_outbox (
             event_id,
             tenant_id,
@@ -128,33 +135,57 @@ export class InventoryService {
           )
           VALUES ($1, $2, $3, $4, $5::jsonb)
           `,
-        [
-          randomUUID(),
-          tenantId,
-          'stock.updated',
-          stock.id,
-          JSON.stringify({
-            saleId,
-            stockId: stock.id,
-            pharmacyId,
-            medicineId,
-            remainingQuantity: stock.quantity,
-            version: stock.version,
-          }),
-        ],
-      );
+          [
+            randomUUID(),
+            tenantId,
+            'stock.updated',
+            stock.id,
+            JSON.stringify({
+              saleId,
+              stockId: stock.id,
+              pharmacyId,
+              medicineId,
+              remainingQuantity: stock.quantity,
+              version: stock.version,
+              schemaVersion: 1,
+              tenantId,
+              table: 'stocks',
+              documentId: stock.id,
+              operation: 'update',
+              before: {
+                pharmacy_id: pharmacyId,
+                medicine_id: medicineId,
+                quantity: stock.quantity + quantity,
+              },
+              after: {
+                pharmacy_id: pharmacyId,
+                medicine_id: medicineId,
+                quantity: stock.quantity,
+              },
+              stockVersion: stock.version,
+            }),
+          ],
+        );
 
-      await client.query(
-        `
-          UPDATE mutation_receipts
-          SET result = $3::jsonb
-          WHERE tenant_id = $1
-            AND idempotency_key = $2
-          `,
-        [tenantId, idempotencyKey, JSON.stringify(result)],
-      );
+        await this.saveReceipt(client, command, result);
+        return result;
+      },
+    );
+    if ('rejected' in outcome) {
+      throw new ConflictException('Insufficient stock or stock not found');
+    }
+    return outcome;
+  }
 
-      return result;
-    });
+  private async saveReceipt(
+    client: PoolClient,
+    command: SellMedicineCommand,
+    outcome: SaleOutcome,
+  ): Promise<void> {
+    await client.query(
+      `UPDATE mutation_receipts SET result = $3::jsonb
+       WHERE tenant_id = $1 AND idempotency_key = $2`,
+      [command.tenantId, command.idempotencyKey, JSON.stringify(outcome)],
+    );
   }
 }
