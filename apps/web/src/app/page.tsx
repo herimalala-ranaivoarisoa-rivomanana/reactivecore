@@ -1,3 +1,5 @@
+import { connection } from "next/server";
+import { Suspense } from "react";
 
 type HealthResponse = {
   status: "healthy" | "degraded";
@@ -28,7 +30,9 @@ async function getHealth(): Promise<HealthResponse> {
   return response.json();
 }
 
-export default async function Home() {
+async function InfrastructureStatus() {
+  await connection();
+
   let health: HealthResponse | null = null;
 
   try {
@@ -37,6 +41,21 @@ export default async function Home() {
     console.error("Health request failed:", error);
   }
 
+  if (!health) {
+    return <p>Backend unavailable</p>;
+  }
+
+  return (
+    <ul>
+      <li>API: {health.status}</li>
+      <li>PostgreSQL: {health.services.postgres}</li>
+      <li>Redis: {health.services.redis}</li>
+      <li>Checked at: {health.timestamp}</li>
+    </ul>
+  );
+}
+
+export default function Home() {
   return (
     <main style={{
       maxWidth: 800,
@@ -51,16 +70,9 @@ export default async function Home() {
 
       <h2>Infrastructure Status</h2>
 
-      {!health ? (
-        <p>Backend unavailable</p>
-      ) : (
-        <ul>
-          <li>API: {health.status}</li>
-          <li>PostgreSQL: {health.services.postgres}</li>
-          <li>Redis: {health.services.redis}</li>
-          <li>Checked at: {health.timestamp}</li>
-        </ul>
-      )}
+      <Suspense fallback={<p>Checking infrastructure…</p>}>
+        <InfrastructureStatus />
+      </Suspense>
     </main>
   );
 }
