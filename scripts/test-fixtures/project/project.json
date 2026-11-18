@@ -1,0 +1,9 @@
+{
+  "name": "",
+  "queries": {
+    "items.list": { "args": {}, "result": [{ "id": "string", "title": "string" }] }
+  },
+  "mutations": {
+    "items.create": { "args": { "title": "string" }, "result": { "id": "string", "title": "string" } }
+  }
+}

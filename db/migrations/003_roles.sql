@@ -11,10 +11,7 @@ BEGIN
 END $$;
 
 GRANT USAGE ON SCHEMA public TO reactivecore_app, reactivecore_worker;
-GRANT SELECT ON pharmacies, medicines, stocks, sales, mutation_receipts TO reactivecore_app;
-GRANT UPDATE (quantity, version, updated_at) ON stocks TO reactivecore_app;
-GRANT INSERT ON sales, mutation_receipts, event_outbox TO reactivecore_app;
-GRANT UPDATE (result) ON mutation_receipts TO reactivecore_app;
+GRANT INSERT ON event_outbox TO reactivecore_app;
 GRANT USAGE ON SEQUENCE event_outbox_id_seq TO reactivecore_app;
 
 GRANT SELECT ON event_outbox TO reactivecore_worker;

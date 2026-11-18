@@ -1,14 +1,7 @@
-import { ForbiddenException } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
-import { InventoryModule } from './inventory/inventory.module.js';
-import type { MutationPrincipal } from './mutation/mutation.types.js';
-import {
-  loadApplication,
-  type Application,
-} from './platform/load-application.js';
+import { loadApplication } from './platform/load-application.js';
 import { PlatformModule } from './platform/platform.module.js';
 import type { Project } from './platform/project.js';
-import { TasksModule, validateList } from './projects/tasks/tasks.module.js';
 
 function required(name: string): string {
   const value = process.env[name];
@@ -16,40 +9,8 @@ function required(name: string): string {
   return value;
 }
 
-function authorizeStock(principal: MutationPrincipal, args: unknown): void {
-  if (
-    !args ||
-    typeof args !== 'object' ||
-    !('pharmacyId' in args) ||
-    typeof args.pharmacyId !== 'string' ||
-    !principal.allowedPharmacyIds.includes(args.pharmacyId.toLowerCase())
-  ) {
-    throw new ForbiddenException('Pharmacy not authorized');
-  }
-}
-
 async function run() {
-  const application = process.env.RC_APPLICATION;
-  const project: Application | undefined = process.env.RC_APPLICATION_FILE
-    ? await loadApplication(process.env.RC_APPLICATION_FILE)
-    : application === 'inventory'
-      ? {
-          application: InventoryModule,
-          functions: {
-            queries: { 'stocks.list': authorizeStock },
-            mutations: ['inventory.transfer'],
-          },
-        }
-      : application === 'tasks'
-        ? {
-            application: TasksModule,
-            functions: {
-              queries: { 'tasks.list': validateList },
-              mutations: ['tasks.create'],
-            },
-          }
-        : undefined;
-  if (!project) throw new Error('Unknown RC_APPLICATION');
+  const project = await loadApplication(required('RC_APPLICATION_FILE'));
 
   const auth: Project['auth'] = process.env.RC_JWKS_URL
     ? { jwks: new URL(process.env.RC_JWKS_URL) }

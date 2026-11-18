@@ -2,9 +2,7 @@ import type { PoolClient } from 'pg';
 import type { QueryPrincipal } from '../reactive/contracts/query-context.js';
 import type { JournalChange } from '../reactive/changelog/change-log.service.js';
 
-export interface MutationPrincipal extends QueryPrincipal {
-  allowedPharmacyIds: readonly string[];
-}
+export type MutationPrincipal = QueryPrincipal;
 
 export interface MutationRequest {
   principal: MutationPrincipal;

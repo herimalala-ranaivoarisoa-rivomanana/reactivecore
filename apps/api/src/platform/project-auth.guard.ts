@@ -83,19 +83,19 @@ export class ProjectAuthGuard implements CanActivate {
       ) {
         throw new Error('Invalid claims');
       }
-      const pharmacies = payload.pharmacy_ids ?? [];
+      const roles = payload.roles ?? [];
       if (
-        !Array.isArray(pharmacies) ||
-        !pharmacies.every((id: unknown) => typeof id === 'string' && isUUID(id))
+        !Array.isArray(roles) ||
+        !roles.every((role: unknown) => typeof role === 'string')
       ) {
-        throw new Error('Invalid pharmacy claims');
+        throw new Error('Invalid roles');
       }
       request.session = {
         principal: {
           userId: payload.sub.toLowerCase(),
           tenantId: payload.tenant_id.toLowerCase(),
-          roles: [],
-          allowedPharmacyIds: pharmacies.map((id: string) => id.toLowerCase()),
+          roles,
+          claims: payload,
         },
         scopes: payload.scope.split(/\s+/),
         expiresAt: payload.exp * 1000,

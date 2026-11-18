@@ -30,9 +30,6 @@ CREATE POLICY execution_receipt_scope ON public.mutation_execution_receipts
 GRANT SELECT, INSERT ON public.mutation_execution_receipts TO reactivecore_app;
 GRANT UPDATE (response, commit_seq) ON public.mutation_execution_receipts TO reactivecore_app;
 
-GRANT INSERT (id, tenant_id, pharmacy_id, medicine_id, quantity)
-    ON public.stocks TO reactivecore_app;
-
 ALTER TABLE public.event_outbox ADD COLUMN commit_seq BIGINT CHECK (commit_seq > 0);
 
 COMMIT;

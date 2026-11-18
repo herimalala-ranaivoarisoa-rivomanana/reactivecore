@@ -139,6 +139,26 @@ async function migrations(directory, prefix) {
   );
 }
 
+// These exact checksums were shipped to projects before the core was separated.
+const legacyCoreHashes = new Map([
+  [
+    'core/001_initial.sql',
+    'a67e90701aa8d9e378ed1979652a0907ea86a167e5ea4f37bebd1e93ea5ed5c1',
+  ],
+  [
+    'core/002_rls.sql',
+    '333f60e5e05e3dcbc2184b9b6c69e3bd2bd700501271e53209a9d88fa6656a2e',
+  ],
+  [
+    'core/003_roles.sql',
+    'b43e94f26ee29548045b5592b287cd0dd17d2991377f9e4d3a5c410d7e3476f0',
+  ],
+  [
+    'core/005_mutation_engine.sql',
+    '0febcd612bfc7d7a2c0b9ee68b48668421977b68eb3f87e8c74f0e5ed299e507',
+  ],
+]);
+
 async function apply(client, files) {
   const { rows } = await client.query(
     'SELECT name, hash FROM reactivecore_cli.migrations',
@@ -146,7 +166,10 @@ async function apply(client, files) {
   const applied = new Map(rows.map(({ name, hash }) => [name, hash]));
   const lookup = new Map(files.map(({ name, hash }) => [name, hash]));
   for (const [name, hash] of applied) {
-    if (lookup.get(name) !== hash)
+    if (
+      !lookup.has(name) ||
+      (lookup.get(name) !== hash && legacyCoreHashes.get(name) !== hash)
+    )
       throw new Error('Applied migrations were changed or removed');
   }
   for (const namespace of ['core/', 'project/']) {

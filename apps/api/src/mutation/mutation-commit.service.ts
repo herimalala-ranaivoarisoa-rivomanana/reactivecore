@@ -5,12 +5,6 @@ import {
   type JournalChange,
 } from '../reactive/changelog/change-log.service.js';
 
-const stockEventTypes = {
-  insert: 'stock.inserted',
-  update: 'stock.updated',
-  delete: 'stock.deleted',
-};
-
 @Injectable()
 export class MutationCommitService {
   constructor(private readonly journal: ChangeLogService) {}
@@ -18,22 +12,16 @@ export class MutationCommitService {
   async commitChanges(
     client: PoolClient,
     tenantId: string,
-    changes: readonly (JournalChange & {
-      notification?: Record<string, unknown>;
-    })[],
+    changes: readonly JournalChange[],
   ): Promise<string> {
     if (changes.length === 0)
       throw new Error('A successful mutation must record a change');
     const seq = await this.journal.append(client, changes);
-    const events = changes.map(({ notification, ...change }) => ({
+    const events = changes.map((change) => ({
       event_id: change.eventId,
-      event_type:
-        change.table === 'stocks'
-          ? stockEventTypes[change.operation]
-          : 'reactive.changed',
+      event_type: 'reactive.changed',
       aggregate_id: change.documentId,
       payload: {
-        ...notification,
         ...change,
         tenantId,
         schemaVersion: 1,

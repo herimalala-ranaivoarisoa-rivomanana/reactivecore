@@ -1,7 +1,14 @@
 import assert from 'node:assert/strict';
 import { execFile, spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { appendFile, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import {
+  appendFile,
+  cp,
+  mkdtemp,
+  readFile,
+  rm,
+  writeFile,
+} from 'node:fs/promises';
 import { join } from 'node:path';
 import { setTimeout } from 'node:timers/promises';
 import { promisify } from 'node:util';
@@ -25,7 +32,7 @@ if (
   !tokenKey
 ) {
   throw new Error(
-    'Start the isolated lab and pass --env-file=.env.module05-lab',
+    'Start test infrastructure and pass --env-file=.env.reactivecore-test',
   );
 }
 
@@ -38,6 +45,8 @@ const issuer = 'urn:reactivecore:cli-test';
 const tenant = randomUUID();
 const env = {
   ...process.env,
+  RC_PROVISION_APP_PASSWORD: appPassword,
+  RC_PROVISION_WORKER_PASSWORD: workerPassword,
   RC_PROVISION_ADMIN_URL: pgUrl('reactivecore', adminPassword, 'postgres'),
   DATABASE_URL: pgUrl('reactivecore_app', appPassword, databaseName),
   REDIS_URL: `redis://:${redisPassword}@127.0.0.1:${process.env.REDIS_PORT}`,
@@ -61,6 +70,22 @@ const logs = [];
 try {
   await cli('init', directory);
   await assert.rejects(cli('init', directory));
+  const manifestPath = join(directory, 'project.json');
+  const empty = JSON.parse(await readFile(manifestPath, 'utf8'));
+  assert.deepEqual(empty, { name, queries: {}, mutations: {} });
+  const fixture = 'scripts/test-fixtures/project';
+  const definitions = JSON.parse(
+    await readFile(join(fixture, 'project.json'), 'utf8'),
+  );
+  await writeFile(manifestPath, JSON.stringify({ ...definitions, name }));
+  await cp(
+    join(fixture, 'application.mjs'),
+    join(directory, 'application.mjs'),
+  );
+  await cp(
+    join(fixture, 'migrations/001_items.sql'),
+    join(directory, 'migrations/001_items.sql'),
+  );
   await cli('codegen', directory);
   const typed = join(directory, 'type-smoke.ts');
   await writeFile(
@@ -113,9 +138,12 @@ void client.mutate('items.create', { title: 42 }, 'id');
   );
   await cli('tenant', directory, tenant);
 
-  await appendFile(join(directory, 'application.mjs'), `
+  await appendFile(
+    join(directory, 'application.mjs'),
+    `
 if (process.env.RC_PROVISION_ADMIN_URL) throw new Error('Provisioning credentials reached the API');
-`);
+`,
+  );
   server = spawn(
     process.execPath,
     ['scripts/reactivecore.mjs', 'serve', directory],
@@ -152,11 +180,17 @@ if (process.env.RC_PROVISION_ADMIN_URL) throw new Error('Provisioning credential
   const stream = client.subscribe('items.list', {}, signal);
   try {
     assert.deepEqual((await stream.next()).value.data, []);
-    const mutation = await client.mutate(
-      'items.create',
-      { title: 'Standalone project' },
-      randomUUID(),
-      signal,
+    const key = randomUUID();
+    const input = { title: 'Standalone project' };
+    const attempts = await Promise.all([
+      client.mutate('items.create', input, key, signal),
+      client.mutate('items.create', input, key, signal),
+    ]);
+    const mutation = attempts.find((result) => !result.replayed);
+    assert.ok(mutation);
+    assert.deepEqual(
+      attempts.find((result) => result.replayed),
+      { ...mutation, replayed: true },
     );
     assert.deepEqual((await stream.next()).value.data, [mutation.data]);
     assert.deepEqual((await client.query('items.list', {}, signal)).data, [
@@ -187,6 +221,20 @@ if (process.env.RC_PROVISION_ADMIN_URL) throw new Error('Provisioning credential
   });
   await admin.connect();
   try {
+    const {
+      rows: [tables],
+    } = await admin.query(
+      "SELECT array_agg(tablename::text ORDER BY tablename) AS names FROM pg_tables WHERE schemaname = 'public'",
+    );
+    assert.deepEqual(tables.names, [
+      'event_outbox',
+      'items',
+      'migration_probe',
+      'mutation_execution_receipts',
+      'reactive_change_log',
+      'reactive_commit_clock',
+      'tenants',
+    ]);
     for (;;) {
       if (worker.exitCode !== null)
         throw new Error('Project worker failed to start');

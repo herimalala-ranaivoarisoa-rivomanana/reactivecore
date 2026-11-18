@@ -5,6 +5,7 @@ export interface QueryPrincipal {
   userId: string;
   tenantId: string;
   roles: readonly string[];
+  claims?: Readonly<Record<string, unknown>>;
 }
 
 export interface DependencyCollector {

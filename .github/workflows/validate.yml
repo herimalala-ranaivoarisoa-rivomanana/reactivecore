@@ -20,8 +20,5 @@ jobs:
       - run: npm run build
       - run: node --test packages/client/test/offline.test.mjs
       - run: npm test
-      - run: node scripts/module05-lab.mjs setup
-      - run: node scripts/module05-lab.mjs test
-      - run: node scripts/module05-lab.mjs platform-setup
-      - run: bash scripts/test-platform.sh
-      - run: node --env-file=.env.module05-lab scripts/test-project.mjs
+      - run: node scripts/test-infra.mjs
+      - run: node --env-file=.env.reactivecore-test scripts/test-project.mjs

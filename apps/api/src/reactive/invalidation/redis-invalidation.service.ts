@@ -18,9 +18,7 @@ function uuid(value: unknown): value is string {
   return typeof value === 'string' && isUUID(value);
 }
 
-export function parseStockChange(
-  message: string,
-): ChangeDescriptor | undefined {
+export function parseChange(message: string): ChangeDescriptor | undefined {
   let event: unknown;
   try {
     event = JSON.parse(message);
@@ -30,51 +28,40 @@ export function parseStockChange(
 
   if (
     !record(event) ||
-    (event.type !== 'stock.updated' &&
-      event.type !== 'stock.inserted' &&
-      event.type !== 'stock.deleted') ||
+    event.type !== 'reactive.changed' ||
     !uuid(event.eventId) ||
     !uuid(event.tenantId) ||
     !uuid(event.aggregateId)
   )
     return;
-
   const payload = event.payload;
-  const change: ChangeDescriptor = {
-    tenantId: event.tenantId.toLowerCase(),
-    table: 'stocks',
-    documentId: event.aggregateId.toLowerCase(),
-    operation:
-      event.type === 'stock.updated'
-        ? 'update'
-        : event.type === 'stock.inserted'
-          ? 'insert'
-          : 'delete',
-  };
-  if (!record(payload)) return;
-  if (payload.schemaVersion === undefined) {
-    // Module 02 events may still be waiting in PostgreSQL.
-    return change.operation === 'update' ? change : undefined;
-  }
   if (
+    !record(payload) ||
     payload.schemaVersion !== 1 ||
     payload.tenantId !== event.tenantId ||
-    payload.table !== change.table ||
     payload.documentId !== event.aggregateId ||
-    payload.operation !== change.operation
+    typeof payload.table !== 'string' ||
+    !payload.table ||
+    (payload.operation !== 'insert' &&
+      payload.operation !== 'update' &&
+      payload.operation !== 'delete')
   )
     return;
 
-  for (const side of ['before', 'after'] as const) {
-    const row = payload[side];
-    if (record(row) && uuid(row.pharmacy_id)) {
-      change[side] = { pharmacy_id: row.pharmacy_id.toLowerCase() };
-      if (typeof row.quantity === 'number' && Number.isFinite(row.quantity)) {
-        change[side].quantity = row.quantity;
-      }
-    }
-  }
-  return change;
+  return {
+    tenantId: event.tenantId.toLowerCase(),
+    table: payload.table,
+    documentId: event.aggregateId.toLowerCase(),
+    operation: payload.operation,
+    before:
+      payload.before === null || record(payload.before)
+        ? payload.before
+        : undefined,
+    after:
+      payload.after === null || record(payload.after)
+        ? payload.after
+        : undefined,
+  };
 }
 
 @Injectable()
@@ -103,24 +90,8 @@ export class RedisInvalidationService implements OnModuleInit, OnModuleDestroy {
   }
 
   private readonly receive = (message: string): void => {
-    const change = parseStockChange(message);
+    const change = parseChange(message);
     if (change) this.subscriptions.invalidate(change);
-    else {
-      // New application modules can use the durable journal without a custom Redis parser.
-      try {
-        const event: unknown = JSON.parse(message);
-        if (
-          record(event) &&
-          event.type === 'reactive.changed' &&
-          uuid(event.eventId) &&
-          uuid(event.tenantId) &&
-          uuid(event.aggregateId)
-        )
-          this.subscriptions.reconcileAll();
-      } catch {
-        // Redis is only a wake-up signal; the journal poll remains authoritative.
-      }
-    }
   };
 
   private async subscribe(client: RedisClientType): Promise<void> {

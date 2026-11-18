@@ -1,57 +1,46 @@
 import { randomUUID } from 'node:crypto';
-import { parseStockChange } from './redis-invalidation.service.js';
+import { parseChange } from './redis-invalidation.service.js';
 
+const tenantId = randomUUID();
+const documentId = randomUUID();
 const event = {
   eventId: randomUUID(),
-  type: 'stock.updated',
-  tenantId: randomUUID(),
-  aggregateId: randomUUID(),
+  tenantId,
+  aggregateId: documentId,
+  type: 'reactive.changed',
+  payload: {
+    schemaVersion: 1,
+    tenantId,
+    documentId,
+    table: 'records',
+    operation: 'update',
+    before: { name: 'before', group_id: 'a' },
+    after: { name: 'after', group_id: 'b' },
+  },
 };
 
-it('validates the versioned stock event and extracts both pharmacies', () => {
-  const pharmacy = randomUUID();
-  const payload = {
-    schemaVersion: 1,
-    tenantId: event.tenantId,
-    table: 'stocks',
-    documentId: event.aggregateId,
+it('preserves arbitrary before and after fields for predicate matching', () => {
+  expect(parseChange(JSON.stringify(event))).toEqual({
+    tenantId,
+    documentId,
+    table: 'records',
     operation: 'update',
-    before: { pharmacy_id: pharmacy, quantity: 2 },
-    after: { pharmacy_id: pharmacy, quantity: 1 },
-  };
-  expect(parseStockChange(JSON.stringify({ ...event, payload }))).toEqual({
-    tenantId: event.tenantId,
-    table: 'stocks',
-    documentId: event.aggregateId,
-    operation: 'update',
-    before: { pharmacy_id: pharmacy, quantity: 2 },
-    after: { pharmacy_id: pharmacy, quantity: 1 },
+    before: event.payload.before,
+    after: event.payload.after,
   });
-  expect(
-    parseStockChange(
-      JSON.stringify({
-        ...event,
-        payload: { ...payload, tenantId: randomUUID() },
-      }),
-    ),
-  ).toBeUndefined();
-  expect(
-    parseStockChange(
-      JSON.stringify({ ...event, payload: { ...payload, schemaVersion: 99 } }),
-    ),
-  ).toBeUndefined();
 });
 
-it('handles earlier outbox rows conservatively and ignores malformed messages', () => {
-  expect(
-    parseStockChange(
-      JSON.stringify({ ...event, payload: { remainingQuantity: 1 } }),
-    ),
-  ).toEqual({
-    tenantId: event.tenantId,
-    table: 'stocks',
-    documentId: event.aggregateId,
-    operation: 'update',
-  });
-  expect(parseStockChange('invalid JSON')).toBeUndefined();
+it('ignores malformed and inconsistent change envelopes', () => {
+  expect(parseChange('invalid')).toBeUndefined();
+  for (const patch of [
+    { schemaVersion: 2 },
+    { tenantId: randomUUID() },
+    { operation: 'unknown' },
+  ]) {
+    expect(
+      parseChange(
+        JSON.stringify({ ...event, payload: { ...event.payload, ...patch } }),
+      ),
+    ).toBeUndefined();
+  }
 });
