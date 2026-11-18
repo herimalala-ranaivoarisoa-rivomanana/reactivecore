@@ -2,6 +2,10 @@ import { ForbiddenException } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import { InventoryModule } from './inventory/inventory.module.js';
 import type { MutationPrincipal } from './mutation/mutation.types.js';
+import {
+  loadApplication,
+  type Application,
+} from './platform/load-application.js';
 import { PlatformModule } from './platform/platform.module.js';
 import type { Project } from './platform/project.js';
 import { TasksModule, validateList } from './projects/tasks/tasks.module.js';
@@ -25,9 +29,10 @@ function authorizeStock(principal: MutationPrincipal, args: unknown): void {
 }
 
 async function run() {
-  const application = required('RC_APPLICATION');
-  const project: Pick<Project, 'application' | 'functions'> | undefined =
-    application === 'inventory'
+  const application = process.env.RC_APPLICATION;
+  const project: Application | undefined = process.env.RC_APPLICATION_FILE
+    ? await loadApplication(process.env.RC_APPLICATION_FILE)
+    : application === 'inventory'
       ? {
           application: InventoryModule,
           functions: {

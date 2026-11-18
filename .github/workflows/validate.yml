@@ -23,3 +23,4 @@ jobs:
       - run: node scripts/module05-lab.mjs test
       - run: node scripts/module05-lab.mjs platform-setup
       - run: bash scripts/test-platform.sh
+      - run: node --env-file=.env.module05-lab scripts/test-project.mjs
