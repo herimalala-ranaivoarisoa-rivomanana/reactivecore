@@ -14,7 +14,7 @@ interface Snapshot {
   data: Stock[];
 }
 
-type StreamState = "connecting" | "live" | "reconnecting" | "error";
+type StreamState = "offline" | "connecting" | "live" | "reconnecting" | "error";
 
 function isSnapshot(value: unknown): value is Snapshot {
   if (!value || typeof value !== "object") return false;
@@ -77,6 +77,7 @@ export function useReactiveQuery(
   name: "inventory.list",
   { pharmacyId, availableOnly = false }: { pharmacyId: string; availableOnly?: boolean },
   token: string,
+  scope: string,
 ) {
   const input = JSON.stringify({ name, args: { pharmacyId, availableOnly } });
   const [view, setView] = useState<{
@@ -85,13 +86,22 @@ export function useReactiveQuery(
 
   useEffect(() => {
     const stop = new AbortController();
+    const cacheKey = `reactivecore.snapshot:${scope}:${input}`;
     let snapshot: Snapshot | null = null;
+    try {
+      const cached: unknown = JSON.parse(localStorage.getItem(cacheKey) ?? "null");
+      if (isSnapshot(cached)) snapshot = cached;
+    } catch {
+      // Local storage can be disabled; live queries remain available.
+    }
+    let receivedLiveSnapshot = false;
     let delay = 400;
     const publish = (state: StreamState) => {
       if (!stop.signal.aborted) setView({ input, token, snapshot, state });
     };
 
     async function connect() {
+      publish(navigator.onLine ? "connecting" : "offline");
       while (!stop.signal.aborted) {
         try {
           const response = await fetch("/api/reactive/subscribe", {
@@ -108,23 +118,32 @@ export function useReactiveQuery(
             }
           } else {
             await readSnapshots(response.body, (next) => {
-              if (!snapshot || BigInt(next.seq) > BigInt(snapshot.seq)) snapshot = next;
+              if (!receivedLiveSnapshot || !snapshot || BigInt(next.seq) > BigInt(snapshot.seq)) {
+                snapshot = next;
+                try { localStorage.setItem(cacheKey, JSON.stringify(next)); } catch {}
+              }
+              receivedLiveSnapshot = true;
               delay = 400;
-              publish("live");
+              publish(navigator.onLine ? "live" : "offline");
             });
           }
         } catch {
           if (stop.signal.aborted) return;
         }
 
-        publish("reconnecting");
+        publish(navigator.onLine ? "reconnecting" : "offline");
         await pause(delay, stop.signal);
         delay = Math.min(delay * 2, 5000);
       }
     }
+    const offline = () => publish("offline");
+    window.addEventListener("offline", offline);
     void connect();
-    return () => stop.abort();
-  }, [input, token]);
+    return () => {
+      window.removeEventListener("offline", offline);
+      stop.abort();
+    };
+  }, [input, token, scope]);
 
   return view?.input === input && view.token === token
     ? view

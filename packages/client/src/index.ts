@@ -119,3 +119,5 @@ export class ReactiveCoreClient {
     }
   }
 }
+
+export * from "./offline.js";
