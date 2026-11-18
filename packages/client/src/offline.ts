@@ -9,6 +9,7 @@ export interface OfflineOperation<Args> {
   attempts: number;
   resumeAt: number;
   message?: string;
+  commitSeq?: string;
 }
 
 export interface OfflineStore<Args> {
@@ -20,7 +21,7 @@ export interface OfflineStore<Args> {
 }
 
 export type OfflineResult =
-  | { state: 'confirmed' }
+  | { state: 'confirmed'; commitSeq?: string }
   | { state: 'conflict' | 'rejected' | 'retry'; message?: string };
 
 export function isOutstanding(state: OfflineState): boolean {
@@ -81,7 +82,7 @@ export class OfflineQueue<Args> {
         if (current.state !== 'sending' || current.attempts !== claimed.attempts) return;
         const resumeAt = result.state === 'retry'
           ? Date.now() + Math.min(30000, 1000 * 2 ** Math.min(5, claimed.attempts - 1)) : 0;
-        return { ...current, state: result.state, message: 'message' in result ? result.message : undefined, resumeAt };
+        return { ...current, state: result.state, message: 'message' in result ? result.message : undefined, commitSeq: result.state === 'confirmed' ? result.commitSeq : undefined, resumeAt };
       });
       notify();
       if (result.state === 'retry') return;

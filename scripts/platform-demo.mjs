@@ -43,10 +43,12 @@ try {
     while (!existsSync(`${marker}.ready`)) await setTimeout(50, undefined, { signal });
   }
   const idempotencyKey = randomUUID();
-  const args = { title: `Platform demo ${idempotencyKey}` };
+  const args = { id: randomUUID(), title: `Platform demo ${idempotencyKey}` };
   const created = await tasks.mutate('tasks.create', args, idempotencyKey, signal);
   const replay = await tasks.mutate('tasks.create', args, idempotencyKey, signal);
   assert.equal(created.replayed, false);
+  assert.equal(created.data.id, args.id);
+  await assert.rejects(() => tasks.mutate('tasks.create', args, randomUUID(), signal), unauthorized(409));
   assert.deepEqual(replay, { ...created, replayed: true });
   const next = await stream.next();
   assert.equal(next.done, false);

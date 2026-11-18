@@ -1,4 +1,5 @@
-import { BadRequestException, Injectable, Module } from '@nestjs/common';
+import { BadRequestException, ConflictException, Injectable, Module } from '@nestjs/common';
+import { isUUID } from 'class-validator';
 import { randomUUID } from 'node:crypto';
 import type { MutationContext } from '../../mutation/mutation.types.js';
 import { ReactiveMutation } from '../../mutation/reactive-mutation.decorator.js';
@@ -16,12 +17,14 @@ export function validateList(_principal: unknown, args: unknown): void {
   }
 }
 
-function createArgs(raw: unknown): { title: string } {
+interface CreateTask { title: string; id?: string }
+
+function createArgs(raw: unknown): CreateTask {
   if (
     !raw ||
     typeof raw !== 'object' ||
     Array.isArray(raw) ||
-    Object.keys(raw).length !== 1 ||
+    Object.keys(raw).some((key) => key !== "title" && key !== "id") ||
     !('title' in raw) ||
     typeof raw.title !== 'string' ||
     !raw.title.trim() ||
@@ -29,6 +32,10 @@ function createArgs(raw: unknown): { title: string } {
     raw.title.includes('\u0000')
   ) {
     throw new BadRequestException('Expected a title of 1 to 120 characters');
+  }
+  if ('id' in raw) {
+    if (typeof raw.id !== 'string' || !isUUID(raw.id, '4')) throw new BadRequestException('Expected a task UUID v4');
+    return { title: raw.title.trim(), id: raw.id.toLowerCase() };
   }
   return { title: raw.title.trim() };
 }
@@ -55,12 +62,12 @@ class TasksFunctions {
     validate: createArgs,
     authorize: () => {},
   })
-  async create(ctx: MutationContext, { title }: { title: string }) {
-    const id = randomUUID();
-    await ctx.client.query(
-      'INSERT INTO public.tasks (id, tenant_id, title) VALUES ($1, $2, $3)',
+  async create(ctx: MutationContext, { title, id = randomUUID() }: CreateTask) {
+    const result = await ctx.client.query(
+      'INSERT INTO public.tasks (id, tenant_id, title) VALUES ($1, $2, $3) ON CONFLICT (id) DO NOTHING',
       [id, ctx.principal.tenantId, title],
     );
+    if (result.rowCount !== 1) throw new ConflictException('Task ID already in use');
     ctx.recordChange({
       table: 'tasks',
       documentId: id,

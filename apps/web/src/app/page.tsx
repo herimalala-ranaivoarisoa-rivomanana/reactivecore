@@ -71,6 +71,8 @@ export default function Home() {
 
       <p><Link href="/inventory">Ouvrir le laboratoire des stocks en direct</Link></p>
 
+      <p><Link href="/tasks">Ouvrir le laboratoire Tâches hors ligne</Link></p>
+
       <h2>Infrastructure Status</h2>
 
       <Suspense fallback={<p>Checking infrastructure…</p>}>

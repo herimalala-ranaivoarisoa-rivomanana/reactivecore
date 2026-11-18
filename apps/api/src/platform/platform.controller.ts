@@ -2,6 +2,8 @@ import {
   Body,
   Controller,
   ForbiddenException,
+  Get,
+  Header,
   Headers,
   HttpCode,
   HttpException,
@@ -70,6 +72,18 @@ export class PlatformController {
         throw new NotFoundException('Function not exposed');
       functions[body.name](session.principal, body.args);
     }
+  }
+
+  @Get('session')
+  @Header('Cache-Control', 'no-store')
+  identity(@Session() session: ProjectSession) {
+    return {
+      issuer: this.project.issuer,
+      audience: this.project.audience,
+      tenantId: session.principal.tenantId,
+      userId: session.principal.userId,
+      scopes: session.scopes,
+    };
   }
 
   @Post('query')
