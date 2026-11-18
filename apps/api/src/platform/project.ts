@@ -5,6 +5,7 @@ export const PROJECT = Symbol('reactivecore.project');
 
 export type Operation = 'query' | 'mutation' | 'subscribe';
 
+/** Binds trusted application code and function policies to one authentication configuration. */
 export interface Project {
   issuer: string;
   audience: string;

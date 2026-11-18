@@ -7,6 +7,7 @@ import type {
 
 @Injectable()
 export class InvalidationService {
+  /** Checks both sides of an update and conservatively matches missing predicate fields. */
   affects(dependency: Dependency, change: ChangeDescriptor): boolean {
     if (dependency.tenantId !== change.tenantId) {
       return false;
@@ -24,10 +25,6 @@ export class InvalidationService {
       return dependency.documentId === change.documentId;
     }
 
-    // Une dépendance de prédicat peut être affectée
-    // si l'ancienne OU la nouvelle ligne correspond.
-    // Si les données nécessaires sont absentes,
-    // on invalide par prudence.
     return (
       (change.operation !== 'insert' &&
         this.matchesOrUnknown(dependency, change.before)) ||

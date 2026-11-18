@@ -139,7 +139,7 @@ async function migrations(directory, prefix) {
   );
 }
 
-// These exact checksums were shipped to projects before the core was separated.
+/** Historical core hashes accepted for existing database migration ledgers. */
 const legacyCoreHashes = new Map([
   [
     'core/001_initial.sql',
@@ -216,7 +216,6 @@ async function administer(adminUrl, database, name, create, callback) {
     const fresh = existing.rowCount === 0;
     if (fresh) {
       if (!create) throw new Error('Provision the project first');
-      // The generated database name contains only validated ASCII identifiers.
       await server.query(`CREATE DATABASE "${database}"`);
     }
     await connected(databaseUrl(adminUrl, database), async (client) => {

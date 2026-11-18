@@ -9,6 +9,7 @@ export interface MutationDefinition<Args = never> {
   authorize(principal: MutationPrincipal, args: Args): void;
 }
 
+/** Registers a mutation handler with argument validation and authorization policies. */
 export function ReactiveMutation<Args>(
   definition: MutationDefinition<Args>,
 ): MethodDecorator {

@@ -7,6 +7,7 @@ import { SubscriptionManagerService } from './subscriptions/subscription-manager
 export class ReactiveStreamService {
   constructor(private readonly subscriptions: SubscriptionManagerService) {}
 
+  /** Streams complete snapshots and releases the subscription when the connection closes. */
   async open(
     response: Response,
     principal: QueryPrincipal,

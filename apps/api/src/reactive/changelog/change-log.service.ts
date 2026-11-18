@@ -22,6 +22,7 @@ interface JournalRow {
 export class ChangeLogService {
   constructor(private readonly database: DatabaseService) {}
 
+  /** Allocates a commit sequence and appends changes using the caller’s transaction. */
   async append(
     client: PoolClient,
     changes: readonly JournalChange[],
@@ -55,6 +56,7 @@ export class ChangeLogService {
     });
   }
 
+  /** Reads up to 100 whole commit sequences and returns the high-water mark covered by the batch. */
   async readBatch(tenantId: string, afterSeq: string, throughSeq: string) {
     const limit = 100;
     const changes = await this.readAfter(tenantId, afterSeq, throughSeq, limit);
@@ -65,6 +67,7 @@ export class ChangeLogService {
     };
   }
 
+  /** Reads changes in (afterSeq, throughSeq], limiting whole commit sequences when requested. */
   async readAfter(
     tenantId: string,
     afterSeq: string,
@@ -93,7 +96,6 @@ export class ChangeLogService {
         table: row.table_name,
         documentId: row.document_id,
         operation: row.operation,
-        // SQL NULL on the present side means metadata was omitted.
         before:
           row.operation === 'insert' ? null : (row.before_data ?? undefined),
         after:

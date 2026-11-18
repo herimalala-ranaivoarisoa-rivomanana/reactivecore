@@ -56,6 +56,7 @@ export class MutationEngineService {
     private readonly commit: MutationCommitService,
   ) {}
 
+  /** Retries the entire transaction on serialization failures and deadlocks. */
   async runSerializable<T>(
     tenantId: string,
     run: (client: PoolClient) => Promise<T>,
@@ -81,6 +82,7 @@ export class MutationEngineService {
     }
   }
 
+  /** Executes a mutation or returns its stored receipt within the same idempotency scope. */
   async execute({
     principal,
     name,

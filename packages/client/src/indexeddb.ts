@@ -1,5 +1,6 @@
 import type { OfflineOperation, OfflineStore } from './offline.js';
 
+/** Creates a browser store with atomic operation transitions across tabs. */
 export function createIndexedDbStore<Args>(
   databaseName: string,
 ): OfflineStore<Args> {

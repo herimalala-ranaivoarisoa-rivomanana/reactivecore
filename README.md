@@ -1,79 +1,74 @@
 # ReactiveCore
 
-ReactiveCore est un moteur auto-hébergé pour créer des backends transactionnels et temps réel. Chaque application fournit ses fonctions NestJS et ses propres migrations. Le moteur fournit l’API HTTP/SSE, l’authentification JWT, le journal PostgreSQL, l’outbox et un SDK TypeScript avec file hors ligne annulable avant envoi.
+ReactiveCore is a self-hosted backend engine with transactional mutations, real-time queries over HTTP/SSE, and JWT authentication. The TypeScript SDK supports reconnecting subscriptions and a persistent offline mutation queue. Applications provide their own schema, functions, and access policies.
 
-La branche [`demo`](https://github.com/herimalala-ranaivoarisoa-rivomanana/reactivecore/tree/demo) regroupe les interfaces Inventaire et Tâches ainsi que les guides pédagogiques.
+## Create a project
 
-## Créer un backend
+Use Node.js 24 or later, PostgreSQL 16, and Redis. Run the CLI from the ReactiveCore repository.
 
-Avec Node.js 24+, PostgreSQL 16 et Redis, depuis la racine du dépôt :
-
-```bash
+```sh
 npm ci
 npm run build
-npm run project -- init ../mon-projet
+npm run project -- init ../my-project
 ```
 
-Le dossier généré contient un module vide `application.mjs`, un manifeste `project.json`, un dossier `migrations` et un client `client.ts`. Définissez les fonctions de votre application avec `ReactiveQuery` et `ReactiveMutation`. Le module déclare également les fonctions exposées et leurs politiques d’accès. Les migrations métier doivent rattacher les données au tenant et accorder au rôle applicatif les privilèges nécessaires.
+Define trusted application code in `application.mjs` with `ReactiveQuery` and `ReactiveMutation`. Declare the functions exposed by the project and their access policies. Place application migrations in `migrations/`. Migrations must scope tenant data and grant the runtime role only the privileges it needs.
 
-Complétez le manifeste pour générer les types du client. Il accepte les scalaires `string`, `number`, `boolean` et `null`, les objets et les tableaux à type unique.
+Update `project.json` with each function’s argument and result types, then regenerate the typed client. The manifest supports scalars, objects, and homogeneous arrays.
 
-```bash
-npm run project -- codegen ../mon-projet
+```sh
+npm run project -- codegen ../my-project
 ```
 
-Le [projet de test](scripts/test-fixtures/project) montre le contrat minimal d’une requête, d’une mutation et d’une migration. Il est utilisé par le test d’intégration et n’est pas copié par la CLI.
+## Provision the database
 
-## Provisionner et démarrer
+Set `RC_PROVISION_ADMIN_URL` to a PostgreSQL admin connection. On a new cluster, set `RC_PROVISION_APP_PASSWORD` and `RC_PROVISION_WORKER_PASSWORD` to enable the runtime logins. Provisioning preserves credentials for existing logins.
 
-Configurez `RC_PROVISION_ADMIN_URL` avec le compte PostgreSQL d’administration. Sur un cluster neuf, fournissez aussi `RC_PROVISION_APP_PASSWORD` et `RC_PROVISION_WORKER_PASSWORD`. La CLI active ces deux rôles lorsqu’ils ne disposent pas encore d’un accès. Elle ne change pas les mots de passe des rôles déjà actifs.
-
-```bash
-npm run project -- provision ../mon-projet
+```sh
+npm run project -- provision ../my-project
 tenant=$(node -p 'crypto.randomUUID()')
-npm run project -- tenant ../mon-projet "$tenant"
+npm run project -- tenant ../my-project "$tenant"
 ```
 
-La CLI crée `reactivecore_mon_projet`, applique les migrations dans l’ordre et vérifie leurs empreintes aux lancements suivants. Les migrations déjà enregistrées par les versions antérieures restent reconnues à partir de leurs empreintes d’origine. Les données existantes restent dans leur base.
+Provisioning creates `reactivecore_my_project` and applies core and project migrations in order. Subsequent runs check recorded migration hashes and apply pending migrations. Previously deployed core migration hashes are recognized for existing projects.
 
-Configurez le processus API avec les variables suivantes.
+## Run the API and worker
 
-| Variable | Valeur |
+Configure a separate environment for each process.
+
+| Variable | Purpose |
 | --- | --- |
-| `DATABASE_URL` | Connexion à la base du projet avec `reactivecore_app`. |
-| `REDIS_URL` | Connexion au Redis du projet. |
-| `RC_JWT_ISSUER` | Émetteur JWT autorisé. |
-| `RC_JWT_AUDIENCE` | Audience exacte. Par défaut, la CLI utilise `reactivecore:mon-projet`. |
-| `RC_JWKS_URL` | Adresse HTTPS des clés publiques RS256. |
-| `RC_HOST`, `PORT`, `RC_CORS_ORIGINS` | Adresse, port et origines web autorisées selon le déploiement. |
+| `DATABASE_URL` | Project PostgreSQL URL. Use `reactivecore_app` for the API and `reactivecore_worker` for the worker. |
+| `REDIS_URL` | Redis connection URL. |
+| `RC_JWT_ISSUER` | Trusted JWT issuer. |
+| `RC_JWT_AUDIENCE` | Exact JWT audience. The CLI defaults to `reactivecore:my-project`. |
+| `RC_JWKS_URL` | HTTPS URL for the issuer’s RS256 verification keys. |
+| `RC_HOST`, `PORT`, `RC_CORS_ORIGINS` | API bind address, port, and permitted browser origins. The default bind address is `127.0.0.1:4000`. |
+| `RC_INVALIDATION_CHANNEL` | Optional Redis channel override. Use the same value for the API and worker. |
 
-L’émetteur doit fournir un UUID dans `sub`, le tenant autorisé dans `tenant_id`, et les opérations permises dans `scope` sous forme de mots séparés par des espaces. Les politiques métier du projet reçoivent aussi les claims vérifiées. Le mode HS256 avec `RC_JWT_DEV_SECRET` est réservé à `development` et `test`.
+The issuer must provide a UUID in `sub`, the authorized tenant UUID in `tenant_id`, and a space-separated `scope` containing the allowed operations (`query`, `mutation`, `subscribe`). Project access policies receive the verified claims. HS256 with `RC_JWT_DEV_SECRET` is available in development and test only.
 
-```bash
-npm run project -- serve ../mon-projet
+```sh
+npm run project -- serve ../my-project
+npm run project -- worker ../my-project
 ```
 
-Dans un processus séparé, fournissez `DATABASE_URL` avec le rôle `reactivecore_worker` et la même base, puis lancez :
+Run these commands in separate terminals or services. Project modules execute with trusted operator access. Use separate deployments and credentials for applications managed by independent teams.
 
-```bash
-npm run project -- worker ../mon-projet
-```
+## Client API
 
-Le serveur et le worker utilisent par défaut un canal Redis propre au projet. Les rôles sont partagés à l’échelle d’un cluster PostgreSQL. Pour des équipes qui administrent du code indépendamment, isolez les déploiements et les identifiants. Les modules chargés par le moteur sont du code de confiance.
+`POST /api/v1/query`, `/api/v1/mutation`, and `/api/v1/subscribe` accept `{ name, args }` and a bearer token. Mutations also require an `Idempotency-Key` header. Subscriptions return SSE snapshots. The SDK reconnects automatically, and the PostgreSQL change log provides a fallback when Redis is unavailable.
 
-## Intégrer un client
+Use `@reactivecore/client` from the workspace or run `npm pack -w @reactivecore/client` after building. For offline mutations, pair `OfflineQueue` with `createIndexedDbStore` in browsers or supply an `OfflineStore` on another platform. Scope the queue by project, environment, tenant, and authenticated user. Applications manage their own read and UI caches.
 
-Les opérations `POST /api/v1/query`, `/api/v1/mutation` et `/api/v1/subscribe` acceptent `{ name, args }` et `Authorization: Bearer <token>`. Une mutation requiert `Idempotency-Key`. Un abonnement fournit des snapshots SSE et le SDK reprend implicitement la connexion. Le rattrapage du journal PostgreSQL continue lorsque Redis est indisponible.
+## Verify the runtime
 
-Vous pouvez installer `@reactivecore/client` depuis le workspace ou empaqueter sa version compilée avec `npm pack -w @reactivecore/client`. La file hors ligne s’intègre avec `OfflineQueue` et `createIndexedDbStore` dans le navigateur. Définissez un périmètre stable par projet, environnement, tenant et utilisateur authentifié. Le stockage natif est adaptable via `OfflineStore`. La mise en cache de l’interface et des lectures dépend de chaque application.
-
-## Vérifier le moteur
-
-```bash
+```sh
+npm run build
 npm test
 node --test packages/client/test/offline.test.mjs
 node scripts/test-infra.mjs
 node --env-file=.env.reactivecore-test scripts/test-project.mjs
 ```
 
-Le dernier test génère un projet vide, lui ajoute une application de test, crée une base temporaire et vérifie les migrations, les types, la mutation, le flux SSE et le worker. Il supprime la base temporaire après l’exécution.
+The integration test creates a temporary project and database, then verifies migration integrity, idempotent writes, SSE delivery, and worker acknowledgement.

@@ -1,4 +1,5 @@
 export type Scalar = string | number | boolean | null;
+/** Optional lower and upper bounds for a numeric dependency predicate. */
 export interface NumericRange {
   gt?: number;
   gte?: number;
@@ -6,6 +7,7 @@ export interface NumericRange {
   lte?: number;
 }
 
+/** Tenant-scoped data a query depends on, at document, predicate, or table granularity. */
 export type Dependency =
   | {
       kind: 'document';
@@ -27,6 +29,10 @@ export type Dependency =
       table: string;
     };
 
+/**
+ * A committed change used for invalidation. A null row is known to be absent.
+ * An omitted row or field represents missing information and is matched conservatively.
+ */
 export interface ChangeDescriptor {
   tenantId: string;
   table: string;

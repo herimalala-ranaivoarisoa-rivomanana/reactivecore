@@ -63,6 +63,7 @@ export class SubscriptionManagerService
     this.timer.unref();
   }
 
+  /** Registers a subscription and closes it when the optional abort signal fires. */
   async subscribe(
     principal: QueryPrincipal,
     name: string,
@@ -103,6 +104,7 @@ export class SubscriptionManagerService
     }
   }
 
+  /** Schedules affected subscriptions for a fresh query snapshot. */
   invalidate(change: ChangeDescriptor): void {
     const candidates = this.index.candidates(change);
     // A running query may discover dependencies absent from its previous result.
@@ -116,6 +118,7 @@ export class SubscriptionManagerService
     }
   }
 
+  /** Schedules a catch-up pass from the durable change log. */
   reconcileAll(): void {
     void this.poll().catch((error: unknown) => {
       if (!this.closed) this.logger.warn(error);
