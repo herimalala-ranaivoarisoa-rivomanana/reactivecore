@@ -1,20 +1,21 @@
 import assert from 'node:assert/strict';
-import { execFile, spawn } from 'node:child_process';
+import { execFile, spawn, spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import {
   appendFile,
+  chmod,
   cp,
   mkdtemp,
   readFile,
   rm,
   writeFile,
 } from 'node:fs/promises';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { setTimeout } from 'node:timers/promises';
 import { promisify } from 'node:util';
 import { SignJWT } from 'jose';
 import pg from 'pg';
-import { ReactiveCoreClient } from '@reactivecore/client';
 
 const exec = promisify(execFile);
 const name = `items-${randomUUID().slice(0, 8)}`;
@@ -58,16 +59,137 @@ const env = {
   RC_JWT_ISSUER: issuer,
   RC_JWT_DEV_SECRET: tokenKey,
 };
-const cli = (...args) =>
-  exec(process.execPath, ['scripts/reactivecore.mjs', ...args], { env });
+function cli(command, ...args) {
+  if (image && ['provision', 'tenant'].includes(command)) {
+    const keys = [
+      'RC_PROVISION_ADMIN_URL',
+      'RC_PROVISION_APP_PASSWORD',
+      'RC_PROVISION_WORKER_PASSWORD',
+    ];
+    return exec(
+      'docker',
+      [
+        'run',
+        '--rm',
+        '--network',
+        'host',
+        '--mount',
+        `type=bind,src=${directory},dst=/project,readonly`,
+        ...keys.flatMap((key) => ['--env', key]),
+        image,
+        command,
+        '/project',
+        ...args.slice(1),
+      ],
+      { env },
+    );
+  }
+  return exec(
+    process.execPath,
+    ['scripts/reactivecore.mjs', command, ...args],
+    { env },
+  );
+}
 const origin = 'http://127.0.0.1:4403';
 let server;
 let worker;
 let ownsDatabase = false;
-const signal = AbortSignal.timeout(20_000);
+const signal = AbortSignal.timeout(60_000);
 const logs = [];
 
+const image = process.env.RC_TEST_IMAGE;
+const sdkArchive = process.env.RC_TEST_SDK_ARCHIVE;
+const restoredDatabase = `${databaseName}_restore`;
+
+function startRuntime(command, runtimeEnv) {
+  if (!image) {
+    return spawn(
+      process.execPath,
+      ['scripts/reactivecore.mjs', command, directory],
+      {
+        env: runtimeEnv,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      },
+    );
+  }
+  const keys = ['DATABASE_URL', 'REDIS_URL'];
+  if (command === 'serve') {
+    keys.push(
+      'NODE_ENV',
+      'RC_HOST',
+      'PORT',
+      'RC_JWT_ISSUER',
+      'RC_JWT_AUDIENCE',
+      'RC_JWT_DEV_SECRET',
+    );
+  }
+  return spawn(
+    'docker',
+    [
+      'run',
+      '--rm',
+      '--network',
+      'host',
+      '--name',
+      `${name}-${command}`,
+      '--mount',
+      `type=bind,src=${directory},dst=/project,readonly`,
+      ...keys.flatMap((key) => ['--env', key]),
+      image,
+      command,
+      '/project',
+    ],
+    { env: runtimeEnv, stdio: ['ignore', 'pipe', 'pipe'] },
+  );
+}
+
+function postgresTool(args, input) {
+  const result = spawnSync(
+    'docker',
+    [
+      'compose',
+      '-p',
+      'reactivecore-test',
+      '--env-file',
+      '.env.reactivecore-test',
+      'exec',
+      '-T',
+      'postgres',
+      ...args,
+    ],
+    { input, maxBuffer: 16 * 1024 * 1024 },
+  );
+  if (result.error) throw result.error;
+  if (result.status !== 0) throw new Error(result.stderr.toString());
+  return result.stdout;
+}
+
 try {
+  if (sdkArchive) {
+    await writeFile(join(parent, 'package.json'), '{"private":true}');
+    await exec(
+      'npm',
+      [
+        'install',
+        '--ignore-scripts',
+        '--offline',
+        '--no-audit',
+        '--no-fund',
+        resolve(sdkArchive),
+      ],
+      { cwd: parent },
+    );
+  }
+  let sdkModule = '@reactivecore/client';
+  if (sdkArchive) {
+    const entry = join(parent, 'installed-sdk.mjs');
+    await writeFile(
+      entry,
+      "export { ReactiveCoreClient } from '@reactivecore/client';\n",
+    );
+    sdkModule = pathToFileURL(entry).href;
+  }
+  const { ReactiveCoreClient } = await import(sdkModule);
   await cli('init', directory);
   await assert.rejects(cli('init', directory));
   const manifestPath = join(directory, 'project.json');
@@ -86,6 +208,17 @@ try {
     join(fixture, 'migrations/001_items.sql'),
     join(directory, 'migrations/001_items.sql'),
   );
+  if (image) {
+    await chmod(directory, 0o755);
+    await chmod(join(directory, 'migrations'), 0o755);
+    for (const file of [
+      'project.json',
+      'application.mjs',
+      'migrations/001_items.sql',
+    ]) {
+      await chmod(join(directory, file), 0o644);
+    }
+  }
   await cli('codegen', directory);
   const typed = join(directory, 'type-smoke.ts');
   await writeFile(
@@ -127,6 +260,7 @@ void client.mutate('items.create', { title: 42 }, 'id');
     failing,
     'CREATE TABLE public.migration_probe (id int); SELECT missing_column;',
   );
+  if (image) await chmod(failing, 0o644);
   await assert.rejects(
     cli('provision', directory),
     /Migration failed: project\/002_probe.sql/,
@@ -144,14 +278,7 @@ void client.mutate('items.create', { title: 42 }, 'id');
 if (process.env.RC_PROVISION_ADMIN_URL) throw new Error('Provisioning credentials reached the API');
 `,
   );
-  server = spawn(
-    process.execPath,
-    ['scripts/reactivecore.mjs', 'serve', directory],
-    {
-      env,
-      stdio: ['ignore', 'pipe', 'pipe'],
-    },
-  );
+  server = startRuntime('serve', env);
   server.stdout.on('data', (chunk) => logs.push(String(chunk)));
   server.stderr.on('data', (chunk) => logs.push(String(chunk)));
   for (;;) {
@@ -199,21 +326,10 @@ if (process.env.RC_PROVISION_ADMIN_URL) throw new Error('Provisioning credential
   } finally {
     await stream.return();
   }
-  worker = spawn(
-    process.execPath,
-    ['scripts/reactivecore.mjs', 'worker', directory],
-    {
-      env: {
-        ...env,
-        DATABASE_URL: pgUrl(
-          'reactivecore_worker',
-          workerPassword,
-          databaseName,
-        ),
-      },
-      stdio: ['ignore', 'pipe', 'pipe'],
-    },
-  );
+  worker = startRuntime('worker', {
+    ...env,
+    DATABASE_URL: pgUrl('reactivecore_worker', workerPassword, databaseName),
+  });
   worker.stdout.on('data', (chunk) => logs.push(String(chunk)));
   worker.stderr.on('data', (chunk) => logs.push(String(chunk)));
   const admin = new pg.Client({
@@ -248,13 +364,71 @@ if (process.env.RC_PROVISION_ADMIN_URL) throw new Error('Provisioning credential
   } finally {
     await admin.end();
   }
+  const backup = postgresTool([
+    'pg_dump',
+    '-U',
+    'reactivecore',
+    '-Fc',
+    databaseName,
+  ]);
+  postgresTool(['createdb', '-U', 'reactivecore', restoredDatabase]);
+  try {
+    postgresTool(
+      [
+        'pg_restore',
+        '-U',
+        'reactivecore',
+        '--exit-on-error',
+        '-d',
+        restoredDatabase,
+      ],
+      backup,
+    );
+    const restored = new pg.Client({
+      connectionString: pgUrl('reactivecore', adminPassword, restoredDatabase),
+    });
+    await restored.connect();
+    try {
+      assert.deepEqual(
+        (await restored.query('SELECT title FROM public.items')).rows,
+        [{ title: 'Standalone project' }],
+      );
+      const {
+        rows: [state],
+      } = await restored.query(
+        `SELECT (SELECT count(*)::int FROM public.mutation_execution_receipts) AS receipts,
+                (SELECT count(*)::int FROM public.event_outbox WHERE published_at IS NOT NULL) AS published,
+                (SELECT count(*)::int FROM reactivecore_cli.migrations) AS migrations`,
+      );
+      assert.equal(state.receipts, 1);
+      assert.equal(state.published, 1);
+      assert.ok(state.migrations >= 2);
+    } finally {
+      await restored.end();
+    }
+  } finally {
+    postgresTool([
+      'dropdb',
+      '-U',
+      'reactivecore',
+      '--if-exists',
+      restoredDatabase,
+    ]);
+  }
   console.log(
-    'CLI verified: generated types, repeatable and atomic migrations, live SDK update and worker acknowledgment.',
+    'CLI verified: generated types, repeatable and atomic migrations, live SDK update, worker acknowledgment, and database restore.',
   );
 } catch (error) {
   if (logs.length) console.error(logs.join(''));
   throw error;
 } finally {
+  if (image) {
+    await Promise.allSettled(
+      ['serve', 'worker'].map((command) =>
+        exec('docker', ['stop', '--time', '5', `${name}-${command}`]),
+      ),
+    );
+  }
   for (const child of [worker, server]) {
     if (!child || child.exitCode !== null || child.signalCode !== null)
       continue;

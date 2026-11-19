@@ -6,6 +6,10 @@ You supply the schema, queries, mutations, and access policies. ReactiveCore iso
 
 This guide creates a ReactiveCore backend and a separate Vue or Next.js frontend for a live item list. You can replace either example with your own application.
 
+**Release status.** Run ReactiveCore from source today. The GitHub release workflow is ready for the first alpha tag, and the first publication is pending.
+
+[Local setup](#1-install-the-prerequisites) · [Vue and Next.js](#8-create-and-run-a-frontend) · [Offline writes](#add-offline-writes-to-a-frontend) · [Deployment](#9-configure-a-production-deployment) · [Tests](#verify-the-engine)
+
 ## 1. Install the prerequisites
 
 Install Node.js 24 or later, npm, Docker with the Compose plugin, and curl. Run the commands below in a Bash shell from the ReactiveCore repository root, including when opening additional terminals.
@@ -384,7 +388,7 @@ To reopen the queue after a reload without network access, your app needs to rec
 
 #### 2. Connect the queue to your interface
 
-The following browser example works with the `items.create` function from step 2. Use `render` to replace your framework's list of local operations. Supply a token provider bound to the verified account so a queued mutation cannot use a different account's token during a session switch.
+Save the following browser example as `src/offline-items.ts` next to the generated client from step 8. It uses the `items.create` function from step 2. Use `render` to replace your framework's list of local operations. Supply a token provider bound to the verified account so a queued mutation cannot use a different account's token during a session switch.
 
 ```ts
 import {
@@ -393,7 +397,7 @@ import {
   createIndexedDbStore,
   type OfflineOperation,
 } from '@reactivecore/client';
-import { createClient } from './client.js';
+import { createClient } from './reactivecore-client';
 
 type ItemInput = { title: string };
 
@@ -491,7 +495,27 @@ PostgreSQL applies the mutation transactionally when it reaches the server. For 
 
 On a TypeScript mobile or desktop frontend, reuse the queue with a platform-specific `OfflineStore`, such as a SQLite implementation. Implement its update operation as one atomic read, transition, and write. A frontend in another language can implement the same lifecycle against the HTTP and SSE endpoints.
 
+### Proposed Next.js offline starter
+
+An optional starter would make offline behavior reproducible across new Next.js projects. It would connect the frontend to the SDK's persistent mutation queue and ReactiveCore's PostgreSQL transactions, then verify the integration with an automated browser test. The shared queue and the HTTP/SSE protocol would remain usable from Vue and other frontends.
+
+| Benefit | What the starter would provide |
+| --- | --- |
+| Faster setup | Run the app, create a task offline, reload the page, and resume synchronization when the connection returns. |
+| Consistent behavior across projects | Persist operations in IndexedDB, isolate the queue by user and tenant, and support cancellation before the first send. |
+| Safe retries after a disconnect | If PostgreSQL commits a mutation and the response is lost, retry with the original idempotency key so the server can return the stored result without applying the write again. |
+| Regression coverage | Run the complete offline scenario in a browser after updates to Next.js, the SDK, or the backend. |
+| Executable example | Follow one action from the form and IndexedDB through the PostgreSQL transaction to the confirmed view delivered by SSE. |
+
+Each application decides how to present pending operations. A task can appear immediately as a provisional row. A sales app can show a pending sale and keep the last confirmed stock on screen. If two devices sell the last unit offline, the server can accept one sale and reject the other during synchronization when the mutation checks and updates stock in the same transaction. **The local write records the intent. The server transaction validates the business operation.**
+
+The starter's test should state which cache behaviors it covers. Reloading the entry screen, viewing previously fetched data, and opening a page that has never been visited are separate scenarios.
+
+The first automated test should open the app online, go offline, create two operations, reload, and cancel one before reconnecting. After reconnecting, it should verify on the server that the retained operation committed exactly once and the cancelled operation created no row. The browser should receive the confirmed result through SSE.
+
 ## 9. Configure a production deployment
+
+See the [operations guide](OPERATIONS.md) for release artifacts, container deployment, database backup and recovery, and upgrades. ReactiveCore is distributed under the [MIT License](LICENSE).
 
 1. Run provisioning as an administrative job. Give the API the `reactivecore_app` database URL and the worker the `reactivecore_worker` URL. Store the credentials and Redis URL in your deployment's secret manager.
 2. Configure an identity provider to sign RS256 access tokens. Set `RC_JWT_ISSUER`, `RC_JWT_AUDIENCE`, and `RC_JWKS_URL` on the API. Use an HTTPS JWKS URL. Include `iat` and `exp` and give tokens a lifetime of at most one hour. The issuer must supply a UUID in `sub`, the authorized tenant UUID in `tenant_id`, and a space-separated `scope` with the allowed operations. Use the application function policies for permissions within a tenant.
@@ -525,4 +549,4 @@ node scripts/test-infra.mjs
 node --env-file=.env.reactivecore-test scripts/test-project.mjs
 ```
 
-The integration test creates a temporary project and verifies generated types, migrations, idempotency, live updates, and worker acknowledgement.
+The integration test creates a temporary project and verifies generated types, migrations, idempotency, live updates, worker acknowledgement, and restoration from a PostgreSQL backup.
