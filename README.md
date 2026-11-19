@@ -6,7 +6,7 @@ You supply the schema, queries, mutations, and access policies. ReactiveCore iso
 
 This guide creates a ReactiveCore backend and a separate Vue or Next.js frontend for a live item list. You can replace either example with your own application.
 
-**Release status.** ReactiveCore v0.1.0 is published. MultiDB continues development with PostgreSQL and a MySQL preview. [ReactiveCore v0.1.0](https://github.com/herimalala-ranaivoarisoa-rivomanana/reactivecore/releases/tag/v0.1.0) · [ReactiveCore MultiDB](https://github.com/herimalala-ranaivoarisoa-rivomanana/reactivecore-multidb)
+**Release status.** The latest prerelease includes a Linux amd64 runtime, a TypeScript SDK, and SHA-256 checksums. MultiDB continues development with PostgreSQL and a MySQL preview. [ReactiveCore v0.1.1](https://github.com/herimalala-ranaivoarisoa-rivomanana/reactivecore/releases/tag/v0.1.1) · [ReactiveCore MultiDB](https://github.com/herimalala-ranaivoarisoa-rivomanana/reactivecore-multidb)
 
 [Local setup](#1-install-the-prerequisites) · [Vue and Next.js](#8-create-and-run-a-frontend) · [Offline writes](#add-offline-writes-to-a-frontend) · [Deployment](#9-configure-a-production-deployment) · [Tests](#verify-the-engine)
 
@@ -197,7 +197,7 @@ cp ../my-project/client.ts ../my-project-web/src/reactivecore-client.ts
 
 cd ../my-project-web
 npm install
-npm install ./reactivecore-client-0.1.0.tgz
+npm install ./reactivecore-client-0.1.1.tgz
 ```
 
 Use the filename printed by `npm pack` if your SDK version differs. After changing the backend's function contracts, rerun `codegen` from the ReactiveCore repository and copy the new file into `src/reactivecore-client.ts`.
@@ -275,7 +275,7 @@ npm pack -w @reactivecore/client --pack-destination ../my-project-next
 cp ../my-project/client.ts ../my-project-next/src/reactivecore-client.ts
 
 cd ../my-project-next
-npm install ./reactivecore-client-0.1.0.tgz
+npm install ./reactivecore-client-0.1.1.tgz
 ```
 
 From `my-project-next`, replace the starter layout and home page. The layout uses system fonts, and the Client Component opens the subscription in the browser.

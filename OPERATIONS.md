@@ -8,11 +8,11 @@ Once the first GitHub prerelease is published, download the runtime archive, SDK
 
 ```sh
 sha256sum -c SHA256SUMS
-docker load -i reactivecore-v0.1.0-linux-amd64.tar.gz
-export RC_IMAGE=reactivecore:v0.1.0
+docker load -i reactivecore-v0.1.1-linux-amd64.tar.gz
+export RC_IMAGE=reactivecore:v0.1.1
 ```
 
-To install the SDK from that release, run `npm install ./reactivecore-client-0.1.0.tgz` from your frontend. The release workflow publishes both files to GitHub Releases.
+To install the SDK from that release, run `npm install ./reactivecore-client-0.1.1.tgz` from your frontend. The release workflow publishes both files to GitHub Releases.
 
 ## Start a deployment
 
@@ -85,7 +85,7 @@ Check `/api/health/live` for process liveness, `/api/health/ready` for database 
 
 ## Cut a release
 
-After reviewing the changes and verifying them in CI, set matching versions in the root and SDK manifests and update the lockfile. Create and push a tag matching the version, such as `v0.1.0`. The tag workflow builds and reloads the image, verifies it with the packaged SDK, restores a test database, then publishes a GitHub prerelease with checksums.
+After reviewing the changes and verifying them in CI, set matching versions in the root and SDK manifests and update the lockfile. Create and push a tag matching the version, such as `v0.1.1`. The tag workflow builds and reloads the image, verifies it with the packaged SDK, restores a test database, then publishes a GitHub prerelease with checksums.
 
 ## Set SSE limits and retain delivery records
 

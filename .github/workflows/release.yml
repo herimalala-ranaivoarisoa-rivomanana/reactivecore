@@ -40,10 +40,16 @@ jobs:
           docker load -i "dist-release/reactivecore-$GITHUB_REF_NAME-linux-amd64.tar.gz"
       - run: node scripts/test-infra.mjs
       - name: Verify the packaged SDK and runtime image
+        env:
+          RC_RETENTION_TEST: '1'
         run: |
           export RC_TEST_IMAGE="reactivecore:$GITHUB_REF_NAME"
           export RC_TEST_SDK_ARCHIVE="dist-release/reactivecore-client-${GITHUB_REF_NAME#v}.tgz"
           node --env-file=.env.reactivecore-test scripts/test-project.mjs
+      - name: Include release notes
+        run: |
+          notes="docs/releases/${GITHUB_REF_NAME#v}.md"
+          if [ -f "$notes" ]; then cp "$notes" dist-release/RELEASE_NOTES.md; fi
       - name: Write checksums
         working-directory: dist-release
         run: sha256sum ./*.tgz ./*.tar.gz > SHA256SUMS
@@ -68,5 +74,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           (cd dist-release && sha256sum -c SHA256SUMS)
+          notes=(--generate-notes)
+          if [ -f dist-release/RELEASE_NOTES.md ]; then notes=(--notes-file dist-release/RELEASE_NOTES.md); fi
           gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
-            --verify-tag --prerelease --generate-notes dist-release/*
+            --verify-tag --prerelease "${notes[@]}" \
+            dist-release/*.tgz dist-release/*.tar.gz dist-release/SHA256SUMS
