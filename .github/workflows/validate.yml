@@ -21,4 +21,7 @@ jobs:
       - run: node --test packages/client/test/offline.test.mjs
       - run: npm test
       - run: node scripts/test-infra.mjs
-      - run: node --env-file=.env.reactivecore-test scripts/test-project.mjs
+      - name: Verify PostgreSQL integration and retention
+        env:
+          RC_RETENTION_TEST: '1'
+        run: node --env-file=.env.reactivecore-test scripts/test-project.mjs

@@ -349,6 +349,7 @@ if (process.env.RC_PROVISION_ADMIN_URL) throw new Error('Provisioning credential
       'mutation_execution_receipts',
       'reactive_change_log',
       'reactive_commit_clock',
+      'reactive_tenant_clocks',
       'tenants',
     ]);
     for (;;) {
@@ -414,6 +415,51 @@ if (process.env.RC_PROVISION_ADMIN_URL) throw new Error('Provisioning credential
       '--if-exists',
       restoredDatabase,
     ]);
+  }
+  if (process.env.RC_RETENTION_TEST === '1') {
+    const key = randomUUID();
+    const args = { title: 'Retained mutation key' };
+    await client.mutate('items.create', args, key, signal);
+    await client.mutate(
+      'items.create',
+      { title: 'Following operation' },
+      randomUUID(),
+      signal,
+    );
+    const url = pgUrl('reactivecore', adminPassword, databaseName);
+    const maintenance = new pg.Client({ connectionString: url });
+    await maintenance.connect();
+    try {
+      await maintenance.query(
+        "UPDATE mutation_execution_receipts SET created_at = now() - interval '31 days' WHERE tenant_id = $1 AND idempotency_key = $2",
+        [tenant, key],
+      );
+    } finally {
+      await maintenance.end();
+    }
+    const { stdout } = await exec(
+      process.execPath,
+      ['scripts/retain-data.mjs'],
+      {
+        env: {
+          ...process.env,
+          RC_RETENTION_DATABASE_URL: url,
+          RC_RETENTION_TENANT: tenant,
+          RC_RETENTION_KEEP_COMMITS: '1',
+          RC_RETENTION_RECEIPT_DAYS: '30',
+        },
+        signal,
+      },
+    );
+    assert.deepEqual(JSON.parse(stdout), {
+      journalRowsPruned: 2,
+      receiptResponsesCompacted: 1,
+    });
+    await assert.rejects(client.mutate('items.create', args, key, signal), {
+      status: 410,
+    });
+    assert.equal((await client.query('items.list', {}, signal)).data.length, 3);
+    console.log('Journal pruning and retained idempotency key verified.');
   }
   console.log(
     'CLI verified: generated types, repeatable and atomic migrations, live SDK update, worker acknowledgment, and database restore.',

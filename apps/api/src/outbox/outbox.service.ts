@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { DatabaseService } from '../database/database.service.js';
 import { RedisService } from '../redis/redis.service.js';
 
+import { invalidationPayload } from './invalidation-payload.js';
 import { invalidationChannel } from './invalidation-channel.js';
 
 interface OutboxEvent {
@@ -48,7 +49,7 @@ export class OutboxService {
           tenantId: event.tenant_id,
           type: event.event_type,
           aggregateId: event.aggregate_id,
-          payload: event.payload,
+          payload: invalidationPayload(event.event_type, event.payload),
         }),
       );
     } catch (error) {

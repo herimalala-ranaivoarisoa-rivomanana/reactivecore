@@ -34,8 +34,8 @@ export class ChangeLogService {
     return rows[0].seq;
   }
 
-  currentSeq(): Promise<string> {
-    return this.database.currentCommitSeq();
+  currentSeq(tenantId?: string): Promise<string> {
+    return this.database.currentCommitSeq(tenantId);
   }
 
   async hasChanges(
@@ -46,7 +46,9 @@ export class ChangeLogService {
     if (BigInt(afterSeq) >= BigInt(throughSeq)) return false;
     return this.database.readOnlyTenantTransaction(tenantId, async (client) => {
       const { rows } = await client.query<{ changed: boolean }>(
-        `SELECT EXISTS (
+        `SELECT COALESCE((
+           SELECT pruned_through > $2::bigint FROM public.reactive_tenant_clocks WHERE tenant_id = $1
+         ), false) OR EXISTS (
            SELECT 1 FROM public.reactive_change_log
            WHERE tenant_id = $1 AND seq > $2::bigint AND seq <= $3::bigint
          ) AS changed`,
@@ -59,12 +61,28 @@ export class ChangeLogService {
   /** Reads up to 100 whole commit sequences and returns the high-water mark covered by the batch. */
   async readBatch(tenantId: string, afterSeq: string, throughSeq: string) {
     const limit = 100;
-    const changes = await this.readAfter(tenantId, afterSeq, throughSeq, limit);
-    const full = new Set(changes.map(({ seq }) => seq)).size === limit;
-    return {
-      changes,
-      coveredSeq: full ? changes[changes.length - 1].seq : throughSeq,
-    };
+    return this.database.readOnlyTenantTransaction(tenantId, async (client) => {
+      const {
+        rows: [clock],
+      } = await client.query<{ gap: boolean }>(
+        'SELECT pruned_through > $2::bigint AS gap FROM public.reactive_tenant_clocks WHERE tenant_id = $1',
+        [tenantId, afterSeq],
+      );
+      if (clock?.gap) return { changes: [], coveredSeq: throughSeq, gap: true };
+      const changes = await this.readAfter(
+        tenantId,
+        afterSeq,
+        throughSeq,
+        limit,
+        client,
+      );
+      const full = new Set(changes.map(({ seq }) => seq)).size === limit;
+      return {
+        changes,
+        coveredSeq: full ? changes[changes.length - 1].seq : throughSeq,
+        gap: false,
+      };
+    });
   }
 
   /** Reads changes in (afterSeq, throughSeq], limiting whole commit sequences when requested. */
@@ -73,8 +91,9 @@ export class ChangeLogService {
     afterSeq: string,
     throughSeq: string,
     limit?: number,
+    connection?: PoolClient,
   ) {
-    return this.database.readOnlyTenantTransaction(tenantId, async (client) => {
+    const read = async (client: PoolClient) => {
       const { rows } = await client.query<JournalRow>(
         `WITH commits AS (
            SELECT DISTINCT seq FROM public.reactive_change_log
@@ -101,6 +120,9 @@ export class ChangeLogService {
         after:
           row.operation === 'delete' ? null : (row.after_data ?? undefined),
       }));
-    });
+    };
+    return connection
+      ? read(connection)
+      : this.database.readOnlyTenantTransaction(tenantId, read);
   }
 }

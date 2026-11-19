@@ -1,3 +1,5 @@
+import { GoneException } from '@nestjs/common';
+import { minimizeJournalChange } from './minimize-journal-change.js';
 import {
   BadRequestException,
   ConflictException,
@@ -122,9 +124,10 @@ export class MutationEngineService {
         } = await client.query<{
           request_hash: string;
           response: unknown;
+          response_expired: boolean;
           commit_seq: string | null;
         }>(
-          `SELECT request_hash, response, commit_seq::text FROM mutation_execution_receipts
+          `SELECT request_hash, response, response_expired, commit_seq::text FROM mutation_execution_receipts
            WHERE tenant_id = $1 AND principal_id = $2 AND mutation_name = $3 AND idempotency_key = $4`,
           key,
         );
@@ -134,6 +137,8 @@ export class MutationEngineService {
           throw new ConflictException(
             'Idempotency key reused with different arguments',
           );
+        if (receipt.response_expired)
+          throw new GoneException('Mutation response retention has expired');
         return {
           data: receipt.response,
           commitSeq: receipt.commit_seq,
@@ -147,7 +152,10 @@ export class MutationEngineService {
           principal,
           client,
           recordChange: (change) =>
-            changes.push({ ...structuredClone(change), eventId: randomUUID() }),
+            changes.push({
+              ...structuredClone(minimizeJournalChange(change)),
+              eventId: randomUUID(),
+            }),
         },
         structuredClone(validated),
       );

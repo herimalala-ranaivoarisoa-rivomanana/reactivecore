@@ -6,7 +6,7 @@ You supply the schema, queries, mutations, and access policies. ReactiveCore iso
 
 This guide creates a ReactiveCore backend and a separate Vue or Next.js frontend for a live item list. You can replace either example with your own application.
 
-**Release status.** Run ReactiveCore from source today. The GitHub release workflow is ready for the first alpha tag, and the first publication is pending.
+**Release status.** ReactiveCore v0.1.0 is published. MultiDB continues development with PostgreSQL and a MySQL preview. [ReactiveCore v0.1.0](https://github.com/herimalala-ranaivoarisoa-rivomanana/reactivecore/releases/tag/v0.1.0) · [ReactiveCore MultiDB](https://github.com/herimalala-ranaivoarisoa-rivomanana/reactivecore-multidb)
 
 [Local setup](#1-install-the-prerequisites) · [Vue and Next.js](#8-create-and-run-a-frontend) · [Offline writes](#add-offline-writes-to-a-frontend) · [Deployment](#9-configure-a-production-deployment) · [Tests](#verify-the-engine)
 
@@ -538,6 +538,10 @@ To stop the local environment, stop the API, worker, and SSE client with Ctrl+C,
 ```sh
 docker compose -p reactivecore-guide --env-file ../my-project/.env.compose down
 ```
+
+## Database maintenance
+
+Commit sequences are ordered within each tenant. When upgrading from a version with a global clock, apply the migration before restarting the runtime. Journal pruning and receipt response compaction are available as a scheduled maintenance job. [Upgrade and retention instructions](OPERATIONS.md#upgrade-to-tenant-commit-clocks)
 
 ## Verify the engine
 
