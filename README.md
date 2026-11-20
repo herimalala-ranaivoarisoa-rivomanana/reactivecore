@@ -8,11 +8,11 @@ This guide creates a ReactiveCore backend and a separate Vue or Next.js frontend
 
 **Release status.** The latest prerelease includes a Linux amd64 runtime, a TypeScript SDK, and SHA-256 checksums. MultiDB continues development with PostgreSQL and a MySQL preview. [ReactiveCore v0.1.1](https://github.com/herimalala-ranaivoarisoa-rivomanana/reactivecore/releases/tag/v0.1.1) · [ReactiveCore MultiDB](https://github.com/herimalala-ranaivoarisoa-rivomanana/reactivecore-multidb)
 
-[Local setup](#1-install-the-prerequisites) · [Vue and Next.js](#8-create-and-run-a-frontend) · [Offline writes](#add-offline-writes-to-a-frontend) · [Deployment](#9-configure-a-production-deployment) · [Tests](#verify-the-engine)
+[Local setup](#1-install-the-prerequisites) · [Development token](#6-sign-a-local-development-token-and-query-the-api) · [Live test](#7-watch-a-live-update-and-replay-a-mutation) · [Vue and Next.js](#8-create-and-run-a-frontend) · [Offline writes](#add-offline-writes-to-a-frontend) · [Deployment](#9-configure-a-production-deployment) · [Tests](#verify-the-engine)
 
 ## 1. Install the prerequisites
 
-Install Node.js 24 or later, npm, Docker with the Compose plugin, and curl. Run the commands below in a Bash shell from the ReactiveCore repository root, including when opening additional terminals.
+Install Node.js 24 or later, npm, Docker with the Compose plugin, and curl. Use Bash for the commands below. Open each backend terminal in the `reactivecore` directory you clone here. The guide uses the sibling directory `../my-project` for your backend project. Step 8 names the terminal and directory for your frontend.
 
 ```sh
 git clone https://github.com/herimalala-ranaivoarisoa-rivomanana/reactivecore.git
@@ -22,6 +22,8 @@ npm run build
 ```
 
 ## 2. Create a project and add two functions
+
+Run steps 1–4 from the repository root in your setup terminal. Start with a new `../my-project` directory. If you already created this example, keep your existing directory and continue with the first incomplete step.
 
 ```sh
 npm run project -- init ../my-project
@@ -40,7 +42,7 @@ JS
 npm run project -- codegen ../my-project
 ```
 
-This command creates the backend project. Step 8 creates the frontend separately. The CLI requires a new directory and takes the project name from its lowercase directory slug. The generated files belong to your project.
+These commands create the backend project, copy the example, and generate `../my-project/client.ts`. Step 8 creates the frontend separately. The CLI uses the directory name `my-project` as the project name.
 
 | File | What to change for your application |
 | --- | --- |
@@ -91,20 +93,31 @@ Provisioning creates `reactivecore_my_project`, applies core and project migrati
 
 ## 5. Run the API and worker in separate terminals
 
-Terminal A starts the API with a local JWT signing secret.
+Keep these terminals open as you work through steps 6–8.
+
+| Terminal | What runs there |
+| --- | --- |
+| A | API at `http://127.0.0.1:4000` |
+| B | Outbox worker |
+| C | Health checks, JWT generation and mutations |
+| D | Live SSE stream for step 7 |
+| E | Vue or Next.js development server for step 8 |
+
+**Terminal A, from the repository root.** Start the API with a local JWT signing secret.
 
 ```sh
 export NODE_ENV=development
 export DATABASE_URL=postgresql://reactivecore_app:local_app_password@127.0.0.1:56432/reactivecore_my_project
 export REDIS_URL=redis://:local_redis_password@127.0.0.1:57379
 export RC_JWT_ISSUER=urn:reactivecore:local
+export RC_JWT_AUDIENCE=reactivecore:my-project
 export RC_JWT_DEV_SECRET=local-development-signing-secret-only
 export RC_HOST=127.0.0.1 PORT=4000
 export RC_CORS_ORIGINS=http://localhost:5173,http://localhost:3000
 npm run project -- serve ../my-project
 ```
 
-Terminal B starts the worker that publishes invalidations from the transactional outbox.
+**Terminal B, from the repository root.** Start the worker that publishes changes from the transactional outbox.
 
 ```sh
 export DATABASE_URL=postgresql://reactivecore_worker:local_worker_password@127.0.0.1:56432/reactivecore_my_project
@@ -112,7 +125,7 @@ export REDIS_URL=redis://:local_redis_password@127.0.0.1:57379
 npm run project -- worker ../my-project
 ```
 
-In a third terminal, check that the API process is alive and can read the PostgreSQL commit clock. The last endpoint reports the individual dependency statuses.
+**Terminal C, from the repository root.** The first endpoint should return `{"status":"alive"}`, the second `{"status":"ready"}`, and the third should report PostgreSQL and Redis as `up`.
 
 ```sh
 curl -fsS http://127.0.0.1:4000/api/health/live
@@ -122,10 +135,10 @@ curl -fsS http://127.0.0.1:4000/api/health
 
 ## 6. Sign a local development token and query the API
 
-Create a short-lived JWT using the same secret, issuer, and audience as the API. The CLI defaults the audience to `reactivecore:<project-name>`.
+**Terminal C, from the repository root.** Create a helper that issues a 15-minute development JWT for the tenant and user saved in step 4. It uses the signing secret, issuer and audience from Terminal A.
 
 ```sh
-node --env-file=../my-project/.env.identity --input-type=module > ../my-project/.env.token <<'JS'
+cat > ../my-project/sign-dev-token.mjs <<'JS'
 import { SignJWT } from 'jose';
 
 const token = await new SignJWT({
@@ -142,49 +155,98 @@ const token = await new SignJWT({
 
 console.log('TOKEN=' + token);
 JS
+```
 
+Generate or renew the token with this command. Run it from the repository root so Node can resolve the installed `jose` package.
+
+```sh
+(
+  umask 077
+  node --env-file=../my-project/.env.identity --input-type=module \
+    < ../my-project/sign-dev-token.mjs > ../my-project/.env.token
+)
 source ../my-project/.env.token
-curl -fsS http://127.0.0.1:4000/api/v1/session \
+```
+
+The command saves the JWT to `../my-project/.env.token`. To see the value to paste into Vue or Next.js, run the following in Terminal C and copy the printed line.
+
+```sh
+source ../my-project/.env.token
+printf '%s\n' "$TOKEN"
+```
+
+Use the JWT value alone in the browser's **Development token** field. In the shell, send it with the `Bearer` prefix as shown below. Keep the token local and regenerate it after it expires.
+
+```sh
+curl -sS --fail-with-body http://127.0.0.1:4000/api/v1/session \
   -H "Authorization: Bearer $TOKEN"
-curl -fsS http://127.0.0.1:4000/api/v1/query \
+printf '\n'
+curl -sS --fail-with-body http://127.0.0.1:4000/api/v1/query \
   -H "Authorization: Bearer $TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{"name":"items.list","args":{}}'
+printf '\n'
 ```
 
-The session response identifies the tenant, user, and granted scopes. The first query returns `{"data":[],"seq":"0"}` on a fresh database. Sequence values are decimal strings.
+The session response identifies your tenant, user and scopes. The query should show `{"seq":"0","data":[]}` on a fresh tenant. If you already created items, it shows the current list and sequence.
 
 ## 7. Watch a live update and replay a mutation
 
-In a fourth terminal, open the SSE stream and leave it running.
+**Terminal D, from the repository root.** Load the saved token, open the live stream and leave it running.
 
 ```sh
 source ../my-project/.env.token
-curl -fsSN http://127.0.0.1:4000/api/v1/subscribe \
+curl -sSN --fail-with-body http://127.0.0.1:4000/api/v1/subscribe \
   -H "Authorization: Bearer $TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{"name":"items.list","args":{}}'
 ```
 
-You should receive the initial snapshot. Back in the third terminal, make the same mutation twice with one idempotency key.
+The stream sends the current snapshot as soon as it opens. On a fresh tenant you should see this frame, followed by a blank line. The command stays open so it can receive future updates.
+
+```text
+id: 0
+event: snapshot
+data: {"seq":"0","data":[]}
+```
+
+**Terminal C, from the repository root.** Load the same token and send the same request twice. Generate the key once, outside the loop.
 
 ```sh
+source ../my-project/.env.token
 KEY=$(node -p 'crypto.randomUUID()')
 for attempt in 1 2; do
-  curl -fsS http://127.0.0.1:4000/api/v1/mutation \
+  curl -sS --fail-with-body http://127.0.0.1:4000/api/v1/mutation \
     -H "Authorization: Bearer $TOKEN" \
     -H "Idempotency-Key: $KEY" \
     -H 'Content-Type: application/json' \
-    -d '{"name":"items.create","args":{"title":"First live item"}}'
+    -d '{"name":"items.create","args":{"title":"First live item"}}' || break
   printf '\n'
 done
 ```
 
-The first response has `replayed: false`. The second has `replayed: true` with the same item ID and commit sequence. The subscriber receives a snapshot containing one item. Use a fresh key for each new action, and keep the original key and arguments when retrying an action whose outcome is unknown. Stop the stream with Ctrl+C.
+Terminal C prints two JSON responses like these. Your item ID will differ. The item ID and `commitSeq` should match across both responses.
+
+```jsonl
+{"data":{"id":"a340a044-3346-41f2-804b-13a45d41b361","title":"First live item"},"commitSeq":"1","replayed":false}
+{"data":{"id":"a340a044-3346-41f2-804b-13a45d41b361","title":"First live item"},"commitSeq":"1","replayed":true}
+```
+
+Terminal D receives one updated snapshot for the committed write. The retry returns the original receipt without adding another row.
+
+```text
+id: 1
+event: snapshot
+data: {"seq":"1","data":[{"id":"a340a044-3346-41f2-804b-13a45d41b361","title":"First live item"}]}
+```
+
+If the initial snapshot arrives but the update does not, rerun the query from step 6. If it includes the new item, check that Terminal D loaded the same token and that the worker is running in Terminal B. A `401` means you should verify the JWT with the session command in step 6. If it expired, generate a fresh one, reload it in Terminal C and reopen the stream in Terminal D.
+
+Use a fresh key for a new action. When retrying an action whose outcome is unknown, keep its original key and arguments. Press Ctrl+C in Terminal D when you finish.
 
 ## 8. Create and run a frontend
 
-Choose either Vue with Vite or Next.js. Both examples connect to the same backend. If the API is already running, restart it after changing the allowed origins in step 5.
+Choose either Vue with Vite or Next.js. Start the chosen example in Terminal E from the repository root. Keep the API and worker running in A and B and use Terminal C to read or renew the token. If you change the allowed origins in step 5, restart the API.
 
 ### Option A: Vue with Vite
 
@@ -192,15 +254,15 @@ Keep the API and worker running. In a new terminal at the ReactiveCore repositor
 
 ```sh
 (cd .. && npm create vite@latest my-project-web -- --template vue-ts --no-interactive)
-npm pack -w @reactivecore/client --pack-destination ../my-project-web
+SDK_TARBALL=$(npm pack -w @reactivecore/client --pack-destination "$(cd ../my-project && pwd)" --silent)
 cp ../my-project/client.ts ../my-project-web/src/reactivecore-client.ts
 
 cd ../my-project-web
 npm install
-npm install ./reactivecore-client-0.1.1.tgz
+npm install "../my-project/$SDK_TARBALL"
 ```
 
-Use the filename printed by `npm pack` if your SDK version differs. After changing the backend's function contracts, rerun `codegen` from the ReactiveCore repository and copy the new file into `src/reactivecore-client.ts`.
+Run the block in one terminal so `SDK_TARBALL` contains the filename produced by `npm pack`. After changing the backend's function contracts, rerun `codegen` from the ReactiveCore repository and copy the new file into `src/reactivecore-client.ts`.
 
 From `my-project-web`, replace the starter component with the following:
 
@@ -261,24 +323,26 @@ npm run dev -- --port 5173 --strictPort
 ```
 
 1. Open `http://localhost:5173`. Use this exact origin because the API's CORS setting in step 5 allows it.
-2. Paste the token generated in step 6 and click **Connect**. The first snapshot shows the current server list.
+2. In Terminal C, print the saved JWT using the command in step 6. Paste the printed value into **Development token** and click **Connect**. The first snapshot shows the current server list.
 3. Run the mutation from step 7 again with a fresh idempotency key and a new title. The new item should appear in Vue without a page refresh.
 4. If the token expires, rerun step 6 and connect with the new token. The example holds the token in memory. In your application, pass a token provider from your authentication layer so the SDK can obtain a current token on reconnect.
 
 ### Option B: Next.js with the App Router
 
-From the ReactiveCore repository root, scaffold a separate Next.js app, package the SDK, and copy the generated client.
+This example needs the running API and worker from step 5, the generated client from step 2, and a development JWT from step 6. If you skipped token generation, do it before opening the page. [Generate a development JWT](#6-sign-a-local-development-token-and-query-the-api)
+
+In Terminal E, start from the ReactiveCore repository root. Run this block in one terminal to create the Next.js app and install the SDK archive produced by `npm pack`.
 
 ```sh
 (cd .. && npx --yes create-next-app@latest my-project-next --ts --app --src-dir --no-tailwind --use-npm --yes --skip-install)
-npm pack -w @reactivecore/client --pack-destination ../my-project-next
+SDK_TARBALL=$(npm pack -w @reactivecore/client --pack-destination "$(cd ../my-project && pwd)" --silent)
 cp ../my-project/client.ts ../my-project-next/src/reactivecore-client.ts
 
 cd ../my-project-next
-npm install ./reactivecore-client-0.1.1.tgz
+npm install "../my-project/$SDK_TARBALL"
 ```
 
-From `my-project-next`, replace the starter layout and home page. The layout uses system fonts, and the Client Component opens the subscription in the browser.
+Keep Terminal E in `my-project-next`. Replace the starter layout and home page. The layout uses system fonts, and the Client Component opens the subscription in the browser.
 
 ```sh
 cat > src/app/layout.tsx <<'TSX'
@@ -352,9 +416,27 @@ TSX
 npm run dev -- --port 3000
 ```
 
-1. Open `http://localhost:3000` and paste the token from step 6. Click **Connect** to receive the current list.
-2. Run the mutation from step 7 with a fresh idempotency key and a new title. The new item should appear without a page reload.
-3. When the token expires, generate a new one and reconnect. Use your authentication layer's token provider for production.
+1. Open `http://localhost:3000`. This exact browser origin is allowed by the API configuration in step 5.
+2. In **Terminal C**, from the `reactivecore` repository root, print the JWT saved in step 6.
+
+   ```sh
+   source ../my-project/.env.token
+   printf '%s\n' "$TOKEN"
+   ```
+
+3. Paste the printed JWT into **Development token** and click **Connect**. The page should show **Receiving snapshots.** and display **First live item** if step 7 succeeded. An empty list with that status means the tenant has no items yet.
+4. From Terminal C, create an item with a new key. With the page still open, **Item from Next.js check** should appear without reloading.
+
+   ```sh
+   source ../my-project/.env.token
+   curl -sS --fail-with-body http://127.0.0.1:4000/api/v1/mutation \
+     -H "Authorization: Bearer $TOKEN" \
+     -H "Idempotency-Key: $(node -p 'crypto.randomUUID()')" \
+     -H 'Content-Type: application/json' \
+     -d '{"name":"items.create","args":{"title":"Item from Next.js check"}}'
+   ```
+
+5. If you get `401`, confirm that the session command in step 6 accepts the token. A development token lasts 15 minutes. When it expires, run the generation command again in Terminal C, print the fresh JWT and reconnect in the browser. The example keeps the token in memory. Use a token provider from your authentication layer in production.
 
 Both examples display live data. To add offline writes, wire a **Create** button and an operation list to the queue below. In Next.js, initialize IndexedDB from browser code, for example in an effect inside a Client Component.
 
