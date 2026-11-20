@@ -178,10 +178,10 @@ printf '%s\n' "$TOKEN"
 Use the JWT value alone in the browser's **Development token** field. In the shell, send it with the `Bearer` prefix as shown below. Keep the token local and regenerate it after it expires.
 
 ```sh
-curl -sS --fail-with-body http://127.0.0.1:4000/api/v1/session \
+curl -fsS http://127.0.0.1:4000/api/v1/session \
   -H "Authorization: Bearer $TOKEN"
 printf '\n'
-curl -sS --fail-with-body http://127.0.0.1:4000/api/v1/query \
+curl -fsS http://127.0.0.1:4000/api/v1/query \
   -H "Authorization: Bearer $TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{"name":"items.list","args":{}}'
@@ -196,7 +196,7 @@ The session response identifies your tenant, user and scopes. The query should s
 
 ```sh
 source ../my-project/.env.token
-curl -sSN --fail-with-body http://127.0.0.1:4000/api/v1/subscribe \
+curl -fsSN http://127.0.0.1:4000/api/v1/subscribe \
   -H "Authorization: Bearer $TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{"name":"items.list","args":{}}'
@@ -216,7 +216,7 @@ data: {"seq":"0","data":[]}
 source ../my-project/.env.token
 KEY=$(node -p 'crypto.randomUUID()')
 for attempt in 1 2; do
-  curl -sS --fail-with-body http://127.0.0.1:4000/api/v1/mutation \
+  curl -fsS http://127.0.0.1:4000/api/v1/mutation \
     -H "Authorization: Bearer $TOKEN" \
     -H "Idempotency-Key: $KEY" \
     -H 'Content-Type: application/json' \
@@ -429,7 +429,7 @@ npm run dev -- --port 3000
 
    ```sh
    source ../my-project/.env.token
-   curl -sS --fail-with-body http://127.0.0.1:4000/api/v1/mutation \
+   curl -fsS http://127.0.0.1:4000/api/v1/mutation \
      -H "Authorization: Bearer $TOKEN" \
      -H "Idempotency-Key: $(node -p 'crypto.randomUUID()')" \
      -H 'Content-Type: application/json' \
